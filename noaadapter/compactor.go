@@ -37,8 +37,20 @@ func (c *Compactor) View(_ context.Context, msgs []llm.Message) []llm.Message {
 // IsOverflow reports whether err is a context-overflow rejection. The built-in
 // compaction already recognises every provider's phrasing, so the detection is
 // borrowed rather than duplicated.
+//
+// A positive answer also TEACHES the session the provider's real window: these
+// errors usually name it, and the configured limit can be wrong (a gateway in
+// front of the model, another deployment under the same name). Learning here —
+// the one place that holds the error — is what lets Reactive() arm a floor the
+// provider will actually accept instead of 95% of the number it just rejected.
 func (c *Compactor) IsOverflow(err error) bool {
-	return compaction.New(compaction.Config{}, nil).IsOverflow(err)
+	if err == nil || !compaction.New(compaction.Config{}, nil).IsOverflow(err) {
+		return false
+	}
+	if w := ParseOverflowWindow(err.Error()); w > 0 {
+		c.overflow.learn(w)
+	}
+	return true
 }
 
 // Reactive recovers from a prompt-too-long error.

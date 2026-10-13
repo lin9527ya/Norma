@@ -87,12 +87,16 @@ func TestBackgroundTaskEndToEnd(t *testing.T) {
 		t.Fatal("background completion notification was not surfaced into the conversation")
 	}
 
-	// Close removes the task directory.
+	// Close ends the session's processes but KEEPS the task directory: the
+	// background output and the "full output saved to <path>" pointers live there,
+	// and a resumed session (or a later command) still reads them. Growth is
+	// bounded by the stale-session sweep in tool.NewManager, not by deleting live
+	// pointers.
 	if err := sess.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Fatalf("task dir should be removed after Close: %v", err)
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Fatalf("task dir must survive Close: %v", err)
 	}
 }
 

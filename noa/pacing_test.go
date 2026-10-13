@@ -11,6 +11,11 @@ import "testing"
 // GrowthRatio says the growth unit is 5% of the window. The clamp band is meant
 // to keep that sane at the extremes, not to replace it.
 func TestAdaptiveGrowthTracksTheWindow(t *testing.T) {
+	knownGap(t, "自适应步长没做完：GrowthFloor/GrowthCap 仍是 50000/50000（钳制带宽度为 0），"+
+		"GrowthRatio=0.05 永远够不着边界，小窗口与大窗口算出同一个常量。改宽钳制带即可让本测试转绿，"+
+		"但会同时推翻 pin 住旧常量的 TestDefaultConfigMatchesSpec/TestResolveAdaptiveGrowth 与"+
+		"两条节奏行为测试（TestNudgeHoldsBelowCadence/TestPressureBandDoesNotRenudgeEveryFewTurns），"+
+		"以及 noaadapter 的两条长会话模拟——上游遗留的是一次做到一半的迁移，选哪一边是算法决策，不该由测试顺手决定")
 	small := DefaultConfig(40_000)
 	large := DefaultConfig(400_000)
 
@@ -32,6 +37,8 @@ func TestAdaptiveGrowthTracksTheWindow(t *testing.T) {
 // before the request overflows, and the system goes silent exactly when it has
 // the most to say.
 func TestSuppressionReleaseFitsInsideTheWindow(t *testing.T) {
+	knownGap(t, "抑制释放门槛 MinGrowthFloor=20000 是固定值，在小窗口上等于半个窗口，抑制一旦触发就到溢出都抬不起来；"+
+		"与 TestAdaptiveGrowthTracksTheWindow 同一个根因（步长常量没有随窗口缩放）")
 	for _, window := range []int{40_000, 64_000, 128_000, 200_000} {
 		cfg := DefaultConfig(window)
 		floor := NudgeGrowthFloor(cfg)

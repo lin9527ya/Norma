@@ -1,0 +1,24 @@
+name: test
+
+# 个人维护线的最小门：这个仓库是 ARTEX 的唯一 SDK 依赖源（通过 go.mod 的 replace
+# 指向某个 tag），所以"打出去的 tag 必须自带一次完整测试结果"。
+# 上游仓库没有任何 CI；本文件是新增的。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test（串行，count=1 防缓存）
+        run: go test -count=1 ./...

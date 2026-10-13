@@ -24,6 +24,18 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 	if err := cfg.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
+	// A Config assembled by hand (an embedder, a test) may carry no client; a nil
+	// interface dereference would panic mid-request. Fall back to the same default
+	// NewProvider installs, so the request either works or fails like any other
+	// network error.
+	client := cfg.HTTPClient
+	if client == nil {
+		if c, err := defaultHTTPClient(cfg.Proxy); err == nil {
+			client = c
+		} else {
+			client = http.DefaultClient
+		}
+	}
 	retries := cfg.retries()
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -32,7 +44,7 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 		}
 		setHeaders(req)
 
-		resp, err := cfg.HTTPClient.Do(req)
+		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return resp, nil
 		}

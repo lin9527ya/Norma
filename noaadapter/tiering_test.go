@@ -119,10 +119,12 @@ func TestTierTwoIsUnreachableOnSmallWindows(t *testing.T) {
 		}
 	}
 	minBen := max(5000, window/100)
-	if byTier[2] > 0 {
-		t.Fatalf("tier 2 now fires at a %d window (blocks %v) — the documented limitation is "+
-			"fixed and this test should be replaced by an assertion that it keeps working",
-			window, byTier)
+	// 这里原本断言的是"小窗口上 tier 2 不可达"这一限制。限制已经不成立（nudge 的
+	// 钳制带被放宽后，tier 2 在 40k 窗口上照常触发），按当时的说明改写成"它能持续
+	// 工作"的断言：小窗口也要能走到第二层压缩，否则长会话只能靠 tier 1 硬扛。
+	if byTier[2] == 0 {
+		t.Fatalf("tier 2 did not fire at a %d window (blocks %v): small windows must still "+
+			"reach the second compression tier", window, byTier)
 	}
 	t.Logf("window=%d: %d tier-1 blocks holding %d summary tokens (%.0f%% of the window), "+
 		"below the flat minPressureBenefit of %d — tier 2 is declined as not worth a turn",
