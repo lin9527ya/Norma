@@ -29,6 +29,21 @@ fork **保留原 module path**（`github.com/Autumn-27/norma`）——这是 Go 
 
 ## 差异清单
 
+### v0.4.6（2026-10-13）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `tool/task.go` | 新增 `NewManagerIn(base, sessionID)`（`NewManager` 变成 `baseTaskDir()` 的薄封装）；后台任务输出因此可以落在**宿主自己的每次运行目录**里，而不是共享的 `$TMPDIR/norma` | 宿主（ARTEX）的任务工作目录才是那些产物的家：和 spill 输出、执行台账、压缩落盘同根，重启不丢、备份/清理只面对一个根。`$TMPDIR` 既不随宿主生命周期，也可能挂在 tmpfs 上。 |
+| `tool/task.go` | 新增 `safeSessionID`：session id 作为路径元素前先净化（分隔符与非法字符→`_`，纯点号→`default`） | id 由宿主传入（可能源自请求参数），`../..` 这样的值原本会让 `filepath.Join` 把目录建到 base 之外。 |
+| `agentcore/agentcore.go` | `Options.TaskOutputDir`：给定则用它作为后台任务输出的 base | 上面那条的接线面。空 = 维持 `$TMPDIR/norma`（向后兼容）。 |
+
+> 本轮同时**核实并否决**了一个计划中的改动：P17 原计划"恢复时尊重已持久化的压缩边界"。
+> 事实是该机制**上游已实现**——`harness.recordNewBoundary` 会把 boundary marker + 摘要 +
+> 保留尾部**作为普通消息**落盘（`boundary` 类型记录只是可观测性标记、重建时跳过），
+> `agentcore.TestResumeRestoresCompactedView` 已经钉死了这个行为。按计划改 `transcript.Messages`
+> 去重放 boundary 记录会**插入第二个 marker**，被 `TestTranscriptMessagesSkipsBoundary` 当场拦下。
+> 结论：不改，记在此处以免下次再撞。
+
 ### v0.4.5（2026-10-13）
 
 | 位置 | 差异 | 为什么 |

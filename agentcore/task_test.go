@@ -20,6 +20,10 @@ import (
 // the start of the next prompt, and Close removes the session's task directory.
 func TestBackgroundTaskEndToEnd(t *testing.T) {
 	dir := t.TempDir()
+	// A host that owns a per-run workspace hands it in: background output must
+	// land there (with the rest of the run's artifacts), not in the shared temp
+	// root, and it must survive Close.
+	taskOutputDir := t.TempDir()
 
 	turns := [][]llm.StreamEvent{
 		toolTurn("b1", "Bash", `{"command":"sleep 1; echo e2e-out","run_in_background":true}`),
@@ -44,6 +48,7 @@ func TestBackgroundTaskEndToEnd(t *testing.T) {
 		Tools:          []tool.CoreTool{tool.NewBash()},
 		PermissionMode: permission.ModeBypass,
 		WorkingDir:     dir,
+		TaskOutputDir:  taskOutputDir,
 		Deps:           harness.QueryDeps{CallModel: callModel},
 	})
 
@@ -65,10 +70,13 @@ func TestBackgroundTaskEndToEnd(t *testing.T) {
 		t.Fatalf("expected background launch result, got %q", launchText)
 	}
 
-	// The session's task temp dir exists while the task runs.
-	taskDir := filepath.Join(os.TempDir(), "norma", sess.SessionID())
+	// The session's task dir exists while the task runs, under the HOST's base.
+	taskDir := filepath.Join(taskOutputDir, sess.SessionID())
 	if _, err := os.Stat(taskDir); err != nil {
-		t.Fatalf("task dir should exist: %v", err)
+		t.Fatalf("task dir should exist under the host base: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(os.TempDir(), "norma", sess.SessionID())); !os.IsNotExist(err) {
+		t.Fatalf("with TaskOutputDir set nothing may be written to the shared temp root (err=%v)", err)
 	}
 
 	// Wait for the command to finish so its notification is queued.

@@ -160,7 +160,12 @@ type Options struct {
 	// (full content preserved) and the tool return a head + pointer instead of
 	// discarding the overflow (tool.Capture). MaxToolOutputChars caps the head
 	// size fed to the model (0 = default 30000).
-	ToolOutputDir      string
+	ToolOutputDir string
+	// TaskOutputDir, when set, is the base directory for background-task output
+	// (TaskOutput/TaskStop/Monitor). Empty = the shared temp root
+	// (os.TempDir()/norma). Hosts that own a per-run workspace set it so task
+	// output lives with the rest of that run's artifacts and survives a reboot.
+	TaskOutputDir      string
 	MaxToolOutputChars int
 
 	// BashEnv holds extra "KEY=VALUE" entries injected into the environment of
@@ -307,7 +312,7 @@ func NewSession(opts Options) *Session {
 	// control it. Disabled by the global AGENT_CORE_DISABLE_BACKGROUND_TASKS env var
 	// or by setting Options.DisableBackgroundTasks for this session only.
 	if !tool.BackgroundTasksDisabled() && !opts.DisableBackgroundTasks {
-		if mgr, err := tool.NewManager(s.sessionID); err == nil {
+		if mgr, err := tool.NewManagerIn(s.opts.TaskOutputDir, s.sessionID); err == nil {
 			s.tasks = mgr
 			tools = append(tools, tool.NewTaskOutput(), tool.NewTaskStop(), tool.NewTaskList(), tool.NewMonitor())
 		}

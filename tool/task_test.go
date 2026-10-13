@@ -268,6 +268,79 @@ func TestCleanupKeepsTaskDir(t *testing.T) {
 	}
 }
 
+// A host-owned base keeps background output with the rest of that run's
+// artifacts; the session directory is still created underneath it so two
+// sessions sharing one base cannot collide on task file names.
+func TestNewManagerInUsesHostBase(t *testing.T) {
+	base := t.TempDir()
+	m, err := NewManagerIn(base, "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := m.Spawn(SpawnSpec{Command: "echo host-base-out"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(task.OutputPath, base) {
+		t.Fatalf("task output %q must live under the host base %q", task.OutputPath, base)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(task.OutputPath); err == nil && strings.Contains(string(b), "host-base-out") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	m.Cleanup()
+	if _, err := os.Stat(task.OutputPath); err != nil {
+		t.Fatalf("task output must survive Cleanup under a host base: %v", err)
+	}
+	// 两个会话共用一个 base 时各自有目录，task_1 不会互相覆盖。
+	m2, err := NewManagerIn(base, "session-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task2, err := m2.Spawn(SpawnSpec{Command: "echo other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(task.OutputPath) == filepath.Dir(task2.OutputPath) {
+		t.Fatalf("two sessions shared one task dir: %s", filepath.Dir(task2.OutputPath))
+	}
+	m2.Cleanup()
+}
+
+// The session id becomes a path element: separators, "..", or a dots-only id
+// must never name anything outside the base.
+func TestSafeSessionIDNeutralizesPathElements(t *testing.T) {
+	base := t.TempDir()
+	for _, tc := range []struct{ in, want string }{
+		{"exp7-worker-i3", "exp7-worker-i3"},
+		{"../../etc", ".._.._etc"},
+		{"a/b\\c", "a_b_c"},
+		{"..", "default"},
+		{"", "default"},
+		{"s p a c e", "s_p_a_c_e"},
+	} {
+		got := safeSessionID(tc.in)
+		if tc.in == "" {
+			continue // NewManagerIn defaults it, safeSessionID is only reached with a non-empty id
+		}
+		if got != tc.want {
+			t.Fatalf("safeSessionID(%q)=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+	m, err := NewManagerIn(base, "../../escape")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs(base)
+	if !strings.HasPrefix(filepath.Dir(filepath.Dir(m.dir)), abs) {
+		t.Fatalf("manager dir %q escaped the base %q", m.dir, abs)
+	}
+	m.Cleanup()
+}
+
 // withEnv puts the non-interactive defaults in front of nothing and behind the
 // host: a spawned shell never blocks on a pager, and a host that names a value
 // explicitly still wins — without duplicate keys, since getenv returns the first

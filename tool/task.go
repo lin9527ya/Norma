@@ -221,14 +221,38 @@ func baseTaskDir() string { return filepath.Join(os.TempDir(), "norma") }
 // NewManager creates the per-session task directory and garbage-collects stale
 // directories left by previous sessions.
 func NewManager(sessionID string) (*Manager, error) {
+	return NewManagerIn(baseTaskDir(), sessionID)
+}
+
+// NewManagerIn is NewManager rooted at a host-chosen base directory instead of
+// the shared temp root. A host that owns per-run directories (a task workspace,
+// an engagement folder) passes it here so background-task output lands next to
+// the rest of that run's artifacts — one root to keep, back up, and prune —
+// rather than in $TMPDIR, which survives neither a reboot nor a host's own
+// cleanup story.
+//
+// The session directory is still created underneath the base (and sibling
+// session dirs under the base are swept by the same TTL rule), so two sessions
+// sharing one base cannot collide on task file names.
+func NewManagerIn(base, sessionID string) (*Manager, error) {
 	if sessionID == "" {
 		sessionID = "default"
 	}
-	dir := filepath.Join(baseTaskDir(), sessionID, "tasks")
+	// The id becomes a path element: an id carrying separators or ".." would
+	// write outside the base. Hosts pass their own session ids here, so this is
+	// about never letting a surprising one escape the root.
+	sessionID = safeSessionID(sessionID)
+	if base == "" {
+		base = baseTaskDir()
+	}
+	if abs, err := filepath.Abs(base); err == nil {
+		base = abs
+	}
+	dir := filepath.Join(base, sessionID, "tasks")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	cleanStaleSessions(baseTaskDir(), sessionID)
+	cleanStaleSessions(base, sessionID)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		tasks:      map[string]*Task{},
@@ -237,6 +261,28 @@ func NewManager(sessionID string) (*Manager, error) {
 		rootCtx:    ctx,
 		rootCancel: cancel,
 	}, nil
+}
+
+// safeSessionID turns a session id into a single safe path element: anything
+// outside [A-Za-z0-9._-] becomes "_", which also neutralizes "/" and "\", and a
+// result that is only dots collapses to "default" so it can never name a parent
+// directory. Empty input is the caller's to default.
+func safeSessionID(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if strings.Trim(out, ".") == "" {
+		return "default"
+	}
+	return out
 }
 
 // cleanStaleSessions removes sibling session directories older than the TTL.
