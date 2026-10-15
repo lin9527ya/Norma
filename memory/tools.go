@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/norma/permission"
-	"github.com/Autumn-27/norma/tool"
+	"github.com/lin9527ya/Norma/permission"
+	"github.com/lin9527ya/Norma/tool"
 )
 
 // Tools returns the RecallMemory and RecordMemory tools bound to a store.

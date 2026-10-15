@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/Autumn-27/norma/permission"
+	"github.com/lin9527ya/Norma/permission"
 )
 
 // The interactive-shell tool family (opt-in; NOT in DefaultTools). ShellSessionTools

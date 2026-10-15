@@ -8,12 +8,24 @@
 ## 消费方式（下游）
 
 ```go
-// ARTEX/go.mod
+// ARTEX/go.mod（v0.5.0 起）
+require github.com/lin9527ya/Norma v0.5.0
+```
+
+**v0.5.0 起 module path 已改成本仓库**（`github.com/Autumn-27/norma` →
+`github.com/lin9527ya/Norma`），仓库内 93 个文件的自引用与下游的 import 同步改完，
+**不再需要 `replace`**。改名的理由：路径写着上游名字时，人和模型读 `go.mod` 都会误以为
+代码来自原作者（实际一直来自本仓库）；本仓库是**公开**的，换路径不影响任何拉取与凭据。
+
+<details><summary>v0.4.x 的消费方式（历史）</summary>
+
+```go
 replace github.com/Autumn-27/norma => github.com/lin9527ya/Norma v0.4.5
 ```
 
-fork **保留原 module path**（`github.com/Autumn-27/norma`）——这是 Go 的标准 fork
-用法：`replace` 右侧按仓库地址取模块，左侧的 import 路径不变，下游零改动。
+fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧按仓库地址取模块，
+左侧 import 不变、下游零改动）；代价就是上面那条误读。
+</details>
 
 ## 维护约定
 
