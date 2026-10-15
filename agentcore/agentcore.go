@@ -124,8 +124,11 @@ type Options struct {
 	// DeepSeekSearchHeaders 随服务端搜索请求一起发出的额外 HTTP 头（可空）。
 	// 供强制要求路由头的中转端点使用（见 tool.WebSearchConfig.DeepSeekHeaders）。
 	DeepSeekSearchHeaders map[string]string
-	DeepSeekSearchAPIKey  string
-	DeepSeekSearchModel   string
+	// CommandCodeSearchAPIKey / CommandCodeSearchBaseURL 配置 commandcode 的原生搜索通道。
+	CommandCodeSearchAPIKey  string
+	CommandCodeSearchBaseURL string
+	DeepSeekSearchAPIKey     string
+	DeepSeekSearchModel      string
 	// WebSearchProxy, when set, routes web_search requests through this http(s)
 	// proxy URL — useful when the search endpoint is only reachable via a proxy.
 	WebSearchProxy string
@@ -295,7 +298,7 @@ func NewSession(opts Options) *Session {
 		// A misconfigured backend (unknown name, or brave-free without a key)
 		// drops the tool rather than failing the whole session — the rest of the
 		// agent stays usable and the missing tool surfaces the misconfig.
-		if ws, err := tool.NewWebSearch(tool.WebSearchConfig{Backend: opts.WebSearchBackend, BraveAPIKey: opts.BraveSearchAPIKey, TavilyAPIKey: opts.TavilySearchAPIKey, DeepSeekBaseURL: opts.DeepSeekSearchBaseURL, DeepSeekHeaders: opts.DeepSeekSearchHeaders, DeepSeekAPIKey: opts.DeepSeekSearchAPIKey, DeepSeekModel: opts.DeepSeekSearchModel, Proxy: opts.WebSearchProxy, CACert: opts.WebSearchCACert, InsecureTLS: opts.WebSearchInsecureTLS}); err == nil {
+		if ws, err := tool.NewWebSearch(tool.WebSearchConfig{Backend: opts.WebSearchBackend, BraveAPIKey: opts.BraveSearchAPIKey, TavilyAPIKey: opts.TavilySearchAPIKey, DeepSeekBaseURL: opts.DeepSeekSearchBaseURL, DeepSeekHeaders: opts.DeepSeekSearchHeaders, CommandCodeAPIKey: opts.CommandCodeSearchAPIKey, CommandCodeBaseURL: opts.CommandCodeSearchBaseURL, DeepSeekAPIKey: opts.DeepSeekSearchAPIKey, DeepSeekModel: opts.DeepSeekSearchModel, Proxy: opts.WebSearchProxy, CACert: opts.WebSearchCACert, InsecureTLS: opts.WebSearchInsecureTLS}); err == nil {
 			tools = append(tools, ws)
 		}
 	}

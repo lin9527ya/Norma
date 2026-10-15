@@ -54,6 +54,13 @@ type WebSearchConfig struct {
 	DeepSeekBaseURL string
 	DeepSeekAPIKey  string
 	DeepSeekModel   string
+	// CommandCodeAPIKey / CommandCodeBaseURL 配置 "commandcode" 后端：它的原生搜索
+	// 通道 POST {origin}/alpha/web-search（Bearer + {query,numResults} → results[]）。
+	// 该通道**与模型无关、与 LLM 配额解耦**——commandcode 的 /messages 只服务 Claude 系，
+	// deepseek/* 只在 /chat/completions 与 /responses 上，且那两个端点拒收内置 web_search
+	// 工具（只认 type:"function"），所以走原生通道是唯一可用的路。
+	CommandCodeAPIKey  string
+	CommandCodeBaseURL string
 	// DeepSeekHeaders 是这次搜索请求额外要带的 HTTP 头（可空）。有些 Anthropic
 	// 兼容的中转端点强制要求路由头（如 opencode zen 的 x-opencode-session），
 	// 缺了直接 400；头的名字与取值由宿主决定，SDK 只负责原样发出去，不解释。
@@ -120,6 +127,16 @@ func newSearchProvider(cfg WebSearchConfig) (searchProvider, error) {
 			return nil, fmt.Errorf("web_search: backend %q requires a Brave Search API key", backend)
 		}
 		return &braveProvider{apiKey: key, client: client, endpoint: braveEndpoint}, nil
+	case "commandcode":
+		key := strings.TrimSpace(cfg.CommandCodeAPIKey)
+		if key == "" {
+			return nil, fmt.Errorf("web_search: backend %q requires a CommandCode API key", backend)
+		}
+		ep := commandCodeEndpoint(cfg.CommandCodeBaseURL)
+		if ep == "" {
+			return nil, fmt.Errorf("web_search: backend %q requires the CommandCode base URL", backend)
+		}
+		return &commandCodeProvider{apiKey: key, client: client, endpoint: ep}, nil
 	case "tavily":
 		key := strings.TrimSpace(cfg.TavilyAPIKey)
 		if key == "" {
@@ -141,7 +158,7 @@ func newSearchProvider(cfg WebSearchConfig) (searchProvider, error) {
 		}
 		return &deepseekProvider{apiKey: key, model: model, client: client, endpoint: deepseekMessagesURL(base), headers: cfg.DeepSeekHeaders}, nil
 	default:
-		return nil, fmt.Errorf("web_search: unknown backend %q (want \"ddgs\", \"brave-free\", \"tavily\", or \"deepseek\")", backend)
+		return nil, fmt.Errorf("web_search: unknown backend %q (want \"ddgs\", \"brave-free\", \"tavily\", \"deepseek\", or \"commandcode\")", backend)
 	}
 }
 
@@ -378,6 +395,88 @@ func (p *braveProvider) Search(ctx context.Context, query string, limit int) ([]
 // with extracted content summaries, making it a good complement to WebFetch.
 
 const tavilyEndpoint = "https://api.tavily.com/search"
+
+type commandCodeProvider struct {
+	apiKey   string
+	client   *http.Client
+	endpoint string
+}
+
+func (p *commandCodeProvider) Name() string { return "commandcode" }
+
+// Search 打 commandcode 的原生搜索端点：Bearer 鉴权 + {query,numResults}，
+// 应答 {"results":[{url,title,snippet}]}。numResults 官方限 1..10。
+func (p *commandCodeProvider) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	n := limit
+	if n <= 0 {
+		n = 5
+	}
+	if n > 10 {
+		n = 10
+	}
+	payload, err := json.Marshal(map[string]any{"query": query, "numResults": n})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	req.Header.Set("User-Agent", "artex-web-search/1.0")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes))
+	if resp.StatusCode != http.StatusOK {
+		// 把服务端的错误信息带出来（它用 {"error": ...} 报错），别只剩一个状态码。
+		var e struct {
+			Error any `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		detail := ""
+		if e.Error != nil {
+			detail = fmt.Sprintf(": %v", e.Error)
+		}
+		return nil, fmt.Errorf("CommandCode search returned HTTP %d%s", resp.StatusCode, detail)
+	}
+	var out struct {
+		Results []struct {
+			Title   string `json:"title"`
+			URL     string `json:"url"`
+			Snippet string `json:"snippet"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("could not parse CommandCode search response: %w", err)
+	}
+	results := make([]SearchResult, 0, len(out.Results))
+	seen := map[string]bool{}
+	for _, r := range out.Results {
+		if strings.TrimSpace(r.URL) == "" || seen[r.URL] {
+			continue
+		}
+		seen[r.URL] = true
+		results = append(results, SearchResult{Title: r.Title, URL: r.URL, Description: r.Snippet, Position: len(results) + 1})
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, nil
+}
+
+// commandCodeEndpoint 由 base_url 推导原生搜索端点（origin + /alpha/web-search）。
+func commandCodeEndpoint(base string) string {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/alpha/web-search"
+}
 
 type tavilyProvider struct {
 	apiKey   string

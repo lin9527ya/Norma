@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -261,5 +262,52 @@ func TestDeepSeekHeadersReachProvider(t *testing.T) {
 	}
 	if len(prov2.(*deepseekProvider).headers) != 0 {
 		t.Fatal("未配头时不该凭空加头")
+	}
+}
+
+// TestCommandCodeProviderSearch 钉住 commandcode 原生搜索通道的契约：
+// POST {origin}/alpha/web-search + Bearer + {query,numResults} → results[{url,title,snippet}]。
+// 该通道与模型无关（commandcode 的 /messages 只服务 Claude 系、deepseek 只在 /responses 上
+// 且拒收内置 web_search 工具），所以它必须自己就是对的。
+func TestCommandCodeProviderSearch(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"results":[
+			{"url":"https://a.example","title":"A","snippet":"sa"},
+			{"url":"https://a.example","title":"dup","snippet":"dup"},
+			{"url":"https://b.example","title":"B","snippet":"sb"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	p := &commandCodeProvider{apiKey: "k", client: srv.Client(), endpoint: commandCodeEndpoint(srv.URL + "/provider/v1")}
+	got, err := p.Search(context.Background(), "hello world", 5)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if gotPath != "/alpha/web-search" {
+		t.Fatalf("端点应为 origin + /alpha/web-search，实际 %q", gotPath)
+	}
+	if gotAuth != "Bearer k" {
+		t.Fatalf("鉴权应为 Bearer，实际 %q", gotAuth)
+	}
+	if gotBody["query"] != "hello world" || gotBody["numResults"] != float64(5) {
+		t.Fatalf("请求体应为 {query,numResults}，实际 %v", gotBody)
+	}
+	if len(got) != 2 || got[0].URL != "https://a.example" || got[1].Title != "B" {
+		t.Fatalf("应按 url 去重并保留顺序，实际 %+v", got)
+	}
+	if got[0].Description != "sa" || got[0].Position != 1 {
+		t.Fatalf("snippet → Description、位置从 1 起，实际 %+v", got[0])
+	}
+	// numResults 官方限 1..10：给 50 也要收敛到 10
+	if _, err := p.Search(context.Background(), "x", 50); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["numResults"] != float64(10) {
+		t.Fatalf("numResults 上限应为 10，实际 %v", gotBody["numResults"])
 	}
 }
