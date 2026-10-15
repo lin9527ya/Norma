@@ -114,8 +114,8 @@ func TestBraveHTTPError(t *testing.T) {
 func TestUnwrapDDGHref(t *testing.T) {
 	cases := map[string]string{
 		"//duckduckgo.com/l/?uddg=https%3A%2F%2Fx.com%2Fy&rut=z": "https://x.com/y",
-		"https://plain.example/path":                            "https://plain.example/path",
-		"":                                                      "",
+		"https://plain.example/path":                             "https://plain.example/path",
+		"":                                                       "",
 	}
 	for in, want := range cases {
 		if got := unwrapDDGHref(in); got != want {
@@ -231,5 +231,35 @@ func TestParseDeepSeekStreamLimitAndErrors(t *testing.T) {
 	// An empty but well-formed stream is "no results", not a failure.
 	if res, err := parseDeepSeekStream(strings.NewReader("data: [DONE]\n\n"), 5); err != nil || len(res) != 0 {
 		t.Fatalf("empty stream should yield no results and no error, got %v / %v", res, err)
+	}
+}
+
+// TestDeepSeekHeadersReachProvider 钉住"宿主给的路由头进到 provider"这条管道：
+// opencode zen 这类中转端点强制要求 x-opencode-session，缺了直接 400——
+// 头从 WebSearchConfig 一路传到 deepseekProvider.headers，发请求时再原样发出。
+func TestDeepSeekHeadersReachProvider(t *testing.T) {
+	cfg := WebSearchConfig{
+		Backend: "deepseek", DeepSeekBaseURL: "https://example.com/anthropic",
+		DeepSeekAPIKey: "k", DeepSeekModel: "m",
+		DeepSeekHeaders: map[string]string{"x-opencode-session": "artex-test"},
+	}
+	prov, err := newSearchProvider(cfg)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	ds, ok := prov.(*deepseekProvider)
+	if !ok {
+		t.Fatalf("应为 deepseekProvider，实际 %T", prov)
+	}
+	if got := ds.headers["x-opencode-session"]; got != "artex-test" {
+		t.Fatalf("路由头应传到 provider，实际 %q", got)
+	}
+	// 不配头时保持为空（不需要路由头的端点行为不变）
+	prov2, err := newSearchProvider(WebSearchConfig{Backend: "deepseek", DeepSeekBaseURL: "https://example.com/anthropic", DeepSeekAPIKey: "k", DeepSeekModel: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prov2.(*deepseekProvider).headers) != 0 {
+		t.Fatal("未配头时不该凭空加头")
 	}
 }

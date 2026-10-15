@@ -65,7 +65,7 @@ type ptySession struct {
 	lastOut  time.Time
 	exitedAt time.Time
 
-	readCur  int64 // tool-side read cursor (shell_read without since_cursor continues here)
+	readCur  int64         // tool-side read cursor (shell_read without since_cursor continues here)
 	notifyCh chan struct{} // pinged on new output
 	done     chan struct{} // closed when the process exits
 }

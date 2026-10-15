@@ -54,6 +54,10 @@ type WebSearchConfig struct {
 	DeepSeekBaseURL string
 	DeepSeekAPIKey  string
 	DeepSeekModel   string
+	// DeepSeekHeaders 是这次搜索请求额外要带的 HTTP 头（可空）。有些 Anthropic
+	// 兼容的中转端点强制要求路由头（如 opencode zen 的 x-opencode-session），
+	// 缺了直接 400；头的名字与取值由宿主决定，SDK 只负责原样发出去，不解释。
+	DeepSeekHeaders map[string]string
 	// Proxy, when set, routes search requests through this http(s) proxy URL —
 	// useful when the search endpoint is only reachable via a proxy. Empty = direct.
 	Proxy string
@@ -135,7 +139,7 @@ func newSearchProvider(cfg WebSearchConfig) (searchProvider, error) {
 		if model == "" {
 			return nil, fmt.Errorf("web_search: backend %q requires a model name", backend)
 		}
-		return &deepseekProvider{apiKey: key, model: model, client: client, endpoint: deepseekMessagesURL(base)}, nil
+		return &deepseekProvider{apiKey: key, model: model, client: client, endpoint: deepseekMessagesURL(base), headers: cfg.DeepSeekHeaders}, nil
 	default:
 		return nil, fmt.Errorf("web_search: unknown backend %q (want \"ddgs\", \"brave-free\", \"tavily\", or \"deepseek\")", backend)
 	}
@@ -465,6 +469,7 @@ type deepseekProvider struct {
 	model    string
 	client   *http.Client
 	endpoint string
+	headers  map[string]string
 }
 
 func (p *deepseekProvider) Name() string { return "deepseek" }
@@ -509,6 +514,10 @@ func (p *deepseekProvider) Search(ctx context.Context, query string, limit int) 
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
+	// 宿主给的路由头（如 opencode 的 x-opencode-session）原样发；空则不设。
+	for k, v := range p.headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
