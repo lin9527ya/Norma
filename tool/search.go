@@ -45,7 +45,11 @@ func runGlob(_ context.Context, input json.RawMessage, tc *ToolContext) (Result,
 	}
 	root := tc.WorkingDir
 	if in.Path != "" {
-		root = resolvePath(tc, in.Path)
+		resolved, err := resolvePath(tc, in.Path)
+		if err != nil {
+			return Errorf(fmt.Sprintf("Error: %v", err)), nil
+		}
+		root = resolved
 	}
 	if root == "" {
 		root = "."
@@ -207,7 +211,11 @@ func runGrep(_ context.Context, input json.RawMessage, tc *ToolContext) (Result,
 	}
 	root := tc.WorkingDir
 	if in.Path != "" {
-		root = resolvePath(tc, in.Path)
+		resolved, err := resolvePath(tc, in.Path)
+		if err != nil {
+			return Errorf(fmt.Sprintf("Error: %v", err)), nil
+		}
+		root = resolved
 	}
 	if root == "" {
 		root = "."
@@ -222,7 +230,9 @@ func runGrep(_ context.Context, input json.RawMessage, tc *ToolContext) (Result,
 	}
 
 	// Prefer the ripgrep binary when available; fall back to the Go walk below.
-	if rg := RipgrepPath(); rg != "" {
+	// 装了 path guard 时必须走 Go walk：rg 是子进程、自己读文件，guard 看不到它碰了
+	// 哪些路径——否则一次 Grep 就能把被拒文件的内容打出来。
+	if rg := RipgrepPath(); rg != "" && !pathGuardSet() {
 		if res, ok := runWithRipgrep(rg, ripgrepReq{
 			pattern: in.Pattern, glob: in.Glob, typ: in.Type, mode: mode,
 			ignoreCase: in.IgnoreCase, multiline: in.Multiline, showLines: showLines,
@@ -263,6 +273,9 @@ func runGrep(_ context.Context, input json.RawMessage, tc *ToolContext) (Result,
 			}
 			if len(typeGlobs) > 0 && !matchAnyGlob(typeGlobs, base) {
 				return nil
+			}
+			if err := guardPath(p); err != nil {
+				return nil // 跳过被 guard 拒绝的文件（不打断整次搜索）
 			}
 			scan(p, root)
 			return nil

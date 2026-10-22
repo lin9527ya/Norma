@@ -164,6 +164,7 @@ func runBashSync(ctx context.Context, tc *ToolContext, command string, timeout t
 	} else {
 		cmd.Env = withEnv(nil)
 	}
+	applyExecHook(cmd)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf

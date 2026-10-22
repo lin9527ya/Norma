@@ -95,11 +95,24 @@ func spillOutput(dir, s string) (string, error) {
 }
 
 // resolvePath joins a relative path against the working directory.
-func resolvePath(tc *ToolContext, p string) string {
-	if filepath.IsAbs(p) || tc == nil || tc.WorkingDir == "" {
-		return p
+// resolvePath resolves p against the tool context's working directory, then hands it to
+// the process path guard (when installed). The returned path is the LOGICAL one callers
+// use for os.*; the guard sees the symlink-resolved real path (see guardPath).
+func resolvePath(tc *ToolContext, p string) (string, error) {
+	abs := p
+	if !filepath.IsAbs(p) && tc != nil && tc.WorkingDir != "" {
+		abs = filepath.Join(tc.WorkingDir, p)
 	}
-	return filepath.Join(tc.WorkingDir, p)
+	check := abs
+	if !filepath.IsAbs(check) {
+		if a, err := filepath.Abs(check); err == nil {
+			check = a
+		}
+	}
+	if err := guardPath(check); err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 // truncate trims s to max bytes, keeping head and tail. Both cuts are aligned to

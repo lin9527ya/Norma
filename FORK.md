@@ -41,6 +41,14 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.3（2026-10-22）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `tool/exec_hook.go`（新） | `SetExecHook(ExecHook)`：命令启动前回调，可改 `SysProcAttr` / `Env` / `Dir`；Bash（含后台任务）与交互式 shell 的 spawn 点全部接线 | 宿主（BLADE）要让 agent 命令降权（`SysProcAttr.Credential`）并清洗继承来的密钥环境变量。钩子是**进程级一次性**配置：一个进程 = 一个信任级别，不按工具/会话区分。未安装时行为完全不变。 |
+| `tool/path_guard.go`（新） | `SetPathGuard(PathGuard)`：内建文件工具（Read/Write/Edit/MultiEdit/LS/Glob/Grep）触碰路径前过守卫，传入**软链解析后的真实路径**；`Grep` 在有守卫时放弃 rg 快速路径、逐文件判定 | rg 是子进程自己读文件，守卫看不到它碰了什么——否则一次 Grep 就能把被拒文件的内容打出来。传真实路径是因为"指向禁止路径的软链"能绕过任何词法判定。它是**进程内策略、不是 OS 边界**：挡的是"服务端读得到、agent 不该碰"的路径（如安装目录下的 `config.json` / `jwt.key`），命令那条路靠 ExecHook 降权，两者互补。 |
+| `tool/helpers.go` + 7 个调用点 | `resolvePath` 改为返回 `(string, error)` | 守卫拒绝时把原因如实回给模型（`Errorf`），而不是静默回落到某个路径——静默失效正是这类策略最危险的失败方式。 |
+
 ### v0.4.6（2026-10-13）
 
 | 位置 | 差异 | 为什么 |

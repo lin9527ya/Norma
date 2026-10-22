@@ -332,6 +332,7 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Task, error) {
 	cmd.Stdout = f
 	cmd.Stderr = f
 	setDetached(cmd)
+	applyExecHook(cmd)
 
 	if err := cmd.Start(); err != nil {
 		_ = f.Close()

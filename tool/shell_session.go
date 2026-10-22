@@ -302,6 +302,7 @@ func (m *Manager) openSession(command, workDir string, env []string, rows, cols 
 	cmd := exec.CommandContext(m.rootCtx, shell, append(flags, command)...)
 	cmd.Dir = workDir
 	cmd.Env = withEnv(env)
+	applyExecHook(cmd)
 	ptmx, err := startPTY(cmd, rows, cols)
 	if err != nil {
 		return nil, err
