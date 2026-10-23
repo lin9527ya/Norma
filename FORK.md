@@ -41,6 +41,14 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.4（2026-10-23）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `llm/retry.go` | `doStream` 每次尝试使用独立 context：连接阶段 **2 分钟** deadline（覆盖请求写入 + 等响应头）；流式响应再加 **3 分钟空闲看门狗**（收到任何字节重置） | 机器休眠唤醒/代理断开后，连接可能卡在"请求写不出去"或"流不再来数据"。net/http **没有写超时**，`ResponseHeaderTimeout` 也只在请求写完后才计时——此前只能挂到 run 预算（planner 20 分钟 / worker 60 分钟），而 run 预算按单调时钟算、休眠期间不走，于是出现过挂 15 小时。超时后按既有重试策略重试；父 context 取消不重试。 |
+| `llm/anthropic.go`、`llm/openai.go`、`llm/openai_responses.go` | `Stream` 传 `stream=true`、`Complete` 传 `false` | 非流式在完整生成前本来就没有字节可读，不能套空闲看门狗（否则会把正常的慢生成误杀）；连接阶段超时两者都适用。 |
+| `llm/timeout_test.go`（新） | 连接超时、流空闲超时、非流式不被空闲超时误杀 三组测试 | 都是"静默挂死"类故障，必须有可回归的判据。 |
+
 ### v0.5.3（2026-10-22）
 
 | 位置 | 差异 | 为什么 |

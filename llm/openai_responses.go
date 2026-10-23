@@ -140,7 +140,7 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req CompletionRequ
 		resp, err := doStream(ctx, p.cfg, p.cfg.BaseURL+"/responses", body, func(r *http.Request) {
 			p.setHeaders(r)
 			r.Header.Set("accept", "text/event-stream")
-		}, "openai-responses")
+		}, "openai-responses", true)
 		if err != nil {
 			yield(StreamEvent{}, err)
 			return
@@ -254,7 +254,7 @@ func (p *openaiResponsesProvider) Complete(ctx context.Context, req CompletionRe
 	resp, err := doStream(ctx, p.cfg, p.cfg.BaseURL+"/responses", body, func(r *http.Request) {
 		p.setHeaders(r)
 		r.Header.Set("accept", "application/json")
-	}, "openai-responses")
+	}, "openai-responses", false)
 	if err != nil {
 		return Message{}, "", Usage{}, err
 	}

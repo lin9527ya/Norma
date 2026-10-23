@@ -117,7 +117,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 			r.Header.Set("x-api-key", p.cfg.APIKey)
 			r.Header.Set("anthropic-version", p.cfg.APIVersion)
 			r.Header.Set("accept", "text/event-stream")
-		}, "anthropic")
+		}, "anthropic", true)
 		if err != nil {
 			yield(StreamEvent{}, err)
 			return
@@ -164,7 +164,7 @@ func (p *anthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 		r.Header.Set("x-api-key", p.cfg.APIKey)
 		r.Header.Set("anthropic-version", p.cfg.APIVersion)
 		r.Header.Set("accept", "application/json")
-	}, "anthropic")
+	}, "anthropic", false)
 	if err != nil {
 		return Message{}, "", Usage{}, err
 	}
