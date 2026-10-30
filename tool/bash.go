@@ -150,6 +150,9 @@ func runBashManaged(ctx context.Context, tc *ToolContext, command string, timeou
 	return Errorf(Capture(tc, out) + fmt.Sprintf("\n\n[command timed out after %s]", timeout)), nil
 }
 
+// bashWaitDelay 是「命令已退出但输出管道仍被后台子进程占着」时的强制收尾时限。
+const bashWaitDelay = 2 * time.Second
+
 // runBashSync is the original blocking implementation, used when no task manager
 // is available (background execution disabled).
 func runBashSync(ctx context.Context, tc *ToolContext, command string, timeout time.Duration) (Result, error) {
@@ -164,11 +167,25 @@ func runBashSync(ctx context.Context, tc *ToolContext, command string, timeout t
 	} else {
 		cmd.Env = withEnv(nil)
 	}
+	// 与后台任务同一套进程组纪律：独立进程组 + 取消时杀整组 + 退出后清场。
+	// 默认的 CommandContext 取消只 Kill 直接子进程，命令里起的后台进程会全成孤儿。
+	setDetached(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			treeKill(cmd.Process)
+		}
+		return nil
+	}
+	// 后台子进程若继承了输出管道，Wait 会一直等它关写端；到点强制收尾。
+	cmd.WaitDelay = bashWaitDelay
 	applyExecHook(cmd)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
+	if cmd.Process != nil {
+		treeKill(cmd.Process)
+	}
 
 	out := Capture(tc, buf.String())
 	if cctx.Err() == context.DeadlineExceeded {

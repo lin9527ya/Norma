@@ -337,6 +337,11 @@ func (m *Manager) readLoop(s *ptySession) {
 		}
 	}
 	_ = s.cmd.Wait()
+	// 与 Bash / 后台任务同一口径：shell 退出后清场整个进程组，`cmd &` 留下的
+	// 后台子进程不该因为会话结束就变成无人引用的孤儿。
+	if s.cmd.Process != nil {
+		treeKill(s.cmd.Process)
+	}
 	s.mu.Lock()
 	if s.state != "closed" {
 		s.state = "exited"

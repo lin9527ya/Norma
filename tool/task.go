@@ -367,6 +367,15 @@ func (m *Manager) watch(t *Task, f *os.File) {
 	err := t.cmd.Wait()
 	close(stop)
 	_ = f.Close()
+	// 清场整组：`sh -c 'scanner &'` 会让 shell 先退出、后台子进程留在同一进程组里。
+	// 只 Wait 不收尾的话它们就成了孤儿——没有 TTL、没人再引用，一直跑下去，
+	// 累积起来能把机器 CPU 吃满。直接子进程已退出，这里只会杀到它留下的后代。
+	//
+	// 注：pid 已被 Wait 回收，理论上存在 PID 复用误伤的可能；窗口是 Wait 返回到
+	// kill 之间的几微秒，实际风险可忽略（与调用方 hosts 的处理同口径）。
+	if t.cmd.Process != nil {
+		treeKill(t.cmd.Process)
+	}
 
 	m.mu.Lock()
 	if t.Status == TaskRunning { // not pre-empted by Kill / watchdog

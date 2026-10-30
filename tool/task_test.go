@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -389,4 +390,74 @@ func countKey(env []string, key string) int {
 		}
 	}
 	return n
+}
+
+// countProcs 数 /proc 里 cmdline 含 needle 的进程（断言孤儿是否真被杀掉）。
+func countProcs(t *testing.T, needle string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Skipf("no /proc: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		if strings.Contains(strings.ReplaceAll(string(b), "\x00", " "), needle) {
+			n++
+		}
+	}
+	return n
+}
+
+// 后台任务正常退出时必须整组清场：`sh -c 'scanner &'` 会让 shell 先退出、后台
+// 子进程留在同一进程组里，只 Wait 不收尾就会留下无人引用的孤儿一直烧 CPU。
+func TestBackgroundTaskKillsLeftoverGroup(t *testing.T) {
+	m := newTestManager(t)
+	tc := &ToolContext{Tasks: m}
+	tag := "norma-orphan-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	cmd := "sh -c 'sleep 120' " + tag + " >/dev/null 2>&1 & echo shell-done"
+	res := runTC(t, NewBash(), tc, map[string]any{"command": cmd})
+	if res.IsError {
+		t.Fatalf("bash error: %s", res.Flatten())
+	}
+	if tasks := m.List(); len(tasks) > 0 {
+		waitTerminal(t, m, tasks[0].ID)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if countProcs(t, tag) == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("任务退出后进程组未清场，仍有 %d 个后台子进程存活", countProcs(t, tag))
+}
+
+// 后台子进程继承 stdout（未重定向）时不应把 Wait 卡死。
+func TestBashSyncChildHoldingStdoutDoesNotWedge(t *testing.T) {
+	m := newTestManager(t)
+	tc := &ToolContext{Tasks: m}
+	tag := "norma-orphan2-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	cmd := "sh -c 'sleep 120' " + tag + " & echo shell-done"
+	done := make(chan Result, 1)
+	go func() { done <- runTC(t, NewBash(), tc, map[string]any{"command": cmd}) }()
+	select {
+	case res := <-done:
+		if !strings.Contains(res.Flatten(), "shell-done") {
+			t.Fatalf("输出丢失: %q", res.Flatten())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Bash 被占管道的后台子进程卡住（WaitDelay 未生效）")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if countProcs(t, tag) == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("占管道的后台子进程未被清理，仍有 %d 个存活", countProcs(t, tag))
 }

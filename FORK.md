@@ -41,6 +41,18 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.5（2026-10-30）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `tool/task.go` `watch()` | `cmd.Wait()` 返回后对整组补一次 `treeKill` | `sh -c 'scanner &'` 里 shell 先退出、后台子进程留在同一进程组。只 Wait 不收尾，它们就成了没有 TTL、没人引用的孤儿，一直跑下去——累积起来能把机器 CPU 吃满。宿主侧（BLADE 的 `run_execution` / 自定义脚本工具）已按同一口径修过，SDK 这条路是最后漏的一处。 |
+| `tool/bash.go` `runBashSync` | `setDetached` + 覆盖 `cmd.Cancel` 杀整组 + `cmd.WaitDelay` + `Run()` 后清场 | 同步 Bash（无 task manager 时）走 `exec.CommandContext`，默认取消只 `Kill` 直接子进程；命令里起的后台进程全成孤儿。`WaitDelay` 同时解决"后台子进程继承输出管道导致 Wait 永久阻塞"。 |
+| `tool/shell_session.go` `readLoop` | shell 退出后 `treeKill` 进程组 | 交互会话结束时 `cmd &` 起的后台进程同样无人接管。 |
+| `tool/task_test.go` | 两个回归：后台任务退出后进程组被清场；占住 stdout 的后台子进程不会卡死 Bash | 都是"进程泄漏"类故障，必须有可回归的判据（不含修复时第一条必红）。 |
+
+> 宿主侧对应修复见 BLADE `88a1ffb` / `715a195`：`run_execution` 的正常退出、停机，
+> 以及自定义 Python 脚本工具的超时，都改成整组清场。本版把同一纪律补进 SDK。
+
 ### v0.5.4（2026-10-23）
 
 | 位置 | 差异 | 为什么 |
