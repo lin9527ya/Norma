@@ -27,6 +27,14 @@ func SetExecHook(fn ExecHook) {
 	execHook.Store(&fn)
 }
 
+// ApplyExecHook 是本包内部的 applyExecHook 的导出版本，供**同进程内其它会 spawn
+// 子进程的包**复用同一套宿主策略（目前是 mcp 的 stdio 传输）。
+//
+// 导出它的理由：宿主只安装一次钩子（tool.SetExecHook），如果别处 spawn 时不调用，
+// 那条路径就静默地落在策略之外——不是"没配"，而是"配了但这里没生效"，更危险。
+// 调用点应当在 cmd 的 Dir/Env 都已设好、Start 之前调用。
+func ApplyExecHook(cmd *exec.Cmd) { applyExecHook(cmd) }
+
 // applyExecHook runs the installed hook, if any. Call it as the last step before
 // starting the command so the hook sees the final Env/Dir.
 func applyExecHook(cmd *exec.Cmd) {

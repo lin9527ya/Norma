@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+
+	"github.com/lin9527ya/Norma/tool"
 )
 
 // stdioCloser shuts down a spawned MCP server process and its pipes.
@@ -45,6 +47,12 @@ func NewStdioClient(ctx context.Context, server, command string, env map[string]
 	if err != nil {
 		return nil, err
 	}
+	// 宿主安装的执行钩子（降权 / 环境清洗）同样要作用到 MCP stdio 子进程。
+	// 此前只覆盖 tool 包自己 spawn 的 Bash / 后台任务 / 交互 shell——MCP server 由
+	// 本包直接 exec，于是「宿主以为自己把 agent 关进低权限用户」在这里破了一个口：
+	// 一个能配置 MCP 的 agent 等于能以服务端身份执行任意命令。
+	// 钩子是进程级的一次性配置，这里与 tool 包用同一份，语义不变。
+	tool.ApplyExecHook(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

@@ -41,6 +41,17 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.6（2026-10-31）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `tool/exec_hook.go` | 导出 `ApplyExecHook`（内部 `applyExecHook` 的包装） | 同进程内**其它**会 spawn 子进程的包需要复用同一套宿主策略。钩子只在 tool 包内被调用过，别处漏调就等于"宿主配了策略但这条路没生效"。 |
+| `mcp/stdio.go` `NewStdioClient` | `cmd.Start()` 之前调用 `tool.ApplyExecHook(cmd)` | MCP stdio server 由 mcp 包直接 `exec.Command` + `os.Environ()` 启动，绕过了宿主的降权与环境清洗。后果是一个能配置 MCP 的 agent 等于能以**服务端身份**执行任意命令——BLADE 的 `create_mcp` 正是模型可调用的工具。修好后 stdio 子进程与 Bash/后台任务/交互 shell 走同一套钩子。 |
+| `mcp/stdio_hook_test.go` | 回归：stdio 子进程必须经过宿主钩子 | 不含修复时必红（已本地验证）。 |
+
+> 宿主侧对应修复见 BLADE：`create_mcp` / `update_mcp` 登记进动作类工具（受停机开关与
+> RoE 范围门约束），且 `create_mcp` 默认 `enabled=false`——不默认启动模型指定的命令。
+
 ### v0.5.5（2026-10-30）
 
 | 位置 | 差异 | 为什么 |
