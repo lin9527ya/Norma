@@ -362,6 +362,24 @@ func (s *Session) Usage() llm.Usage { return s.usage }
 // Reset clears the conversation.
 func (s *Session) Reset() { s.messages = nil; s.usage = llm.Usage{} }
 
+// AppendMessages appends host-supplied messages to the conversation, exactly as if
+// the model had produced them, and records them to the transcript (if enabled).
+//
+// 用途：宿主在两次 Prompt 之间改写"模型看得到的上下文"。典型场景是**跨轮复用会话**——
+// 把上一轮的长历史折叠成「用户问过什么 + 结论是什么」两条消息，再继续用同一个 Session：
+// system prompt 与工具 schema 的缓存前缀因此保持不变，而上下文体积回到可接受范围。
+//
+// 它不做任何校验或修补（工具块配对由 llm.MessagesForAPI 在请求边界处理）；调用方负责
+// 传入结构合法的消息序列。空切片是无操作。
+func (s *Session) AppendMessages(msgs ...llm.Message) {
+	for _, m := range msgs {
+		s.messages = append(s.messages, m)
+		if s.writer != nil {
+			s.writer.RecordMessage(m, llm.Usage{})
+		}
+	}
+}
+
 // SessionID returns the transcript session id (empty if persistence is off).
 func (s *Session) SessionID() string { return s.sessionID }
 

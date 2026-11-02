@@ -41,6 +41,17 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.7（2026-11-02）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `agentcore/agentcore.go` | 新增 `Session.AppendMessages(...llm.Message)` | 宿主需要**在两次 Prompt 之间改写上下文**才能跨轮复用会话：把上一轮的长历史折叠成「问过什么 + 结论是什么」，再继续用同一个 Session，system prompt 与工具 schema 的缓存前缀因此保持不变。此前只能 `Reset()`（清空）或 `Resume()`（从 transcript 全量恢复），中间那条路走不通。 |
+| `agentcore/append_messages_test.go` | 回归：注入的消息必须进入下一次请求，且 system 前缀不变 | 无此方法时测试无法编译；有方法但没接进 `s.messages` 时第二次请求会缺消息（已本地验证）。 |
+
+> 消费方：BLADE 的 planner 热会话（`agent/planner.go` 的 hot session）。它每轮结束
+> 把历史折叠成两条消息，下一轮复用同一个 Session，从而让 system + 工具 schema 的
+> 缓存前缀跨轮保持。
+
 ### v0.5.6（2026-10-31）
 
 | 位置 | 差异 | 为什么 |
