@@ -111,3 +111,46 @@ func TestExecuteExtraTool(t *testing.T) {
 		t.Fatalf("invalid params should error, got %+v", r)
 	}
 }
+
+// 模型常一次问多个工具名（"chrome-devtools navigate_page new_page list_pages"）。
+// 严格 AND 在现实中没有任何单个工具同时命中全部 token，整条查询零命中，模型据此
+// 判定"这些工具不可用"（BLADE 任务 22 实测）。零命中时必须退化成按命中数排序的
+// 近似匹配，而不是一句 No matching。
+func TestSearchExtraToolsFallsBackToRankedMatch(t *testing.T) {
+	names := []string{
+		"mcp__chrome-devtools__navigate_page",
+		"mcp__chrome-devtools__new_page",
+		"mcp__chrome-devtools__list_pages",
+		"mcp__playwright__browser_navigate",
+	}
+	var tools []CoreTool
+	for _, n := range names {
+		tools = append(tools, Build(Spec{Name: n, Description: "browser page navigation tool", Schema: map[string]any{"type": "object"}}))
+	}
+	search := NewSearchExtraTools(NewRegistry(tools...), names)
+	in, _ := json.Marshal(map[string]any{"query": "chrome-devtools navigate_page new_page list_pages"})
+	res, err := search.Call(context.Background(), in, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Flatten()
+	if strings.Contains(got, "No matching") {
+		t.Fatalf("多工具提问不应零命中：%s", got)
+	}
+	// 三个 chrome-devtools 工具都应被列出（playwright 那个不含 chrome-devtools，排在后面或缺失都行）。
+	for _, want := range []string{"navigate_page", "new_page", "list_pages"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("回退结果缺少 %s：%s", want, got)
+		}
+	}
+
+	// 完全无关的查询仍然如实零命中——回退不能变成"问什么都给一堆"。
+	in2, _ := json.Marshal(map[string]any{"query": "zzz-nonexistent-token"})
+	res2, err := search.Call(context.Background(), in2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res2.Flatten(), "No matching") {
+		t.Fatalf("无关查询应零命中：%s", res2.Flatten())
+	}
+}

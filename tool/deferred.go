@@ -96,6 +96,11 @@ func RenderDeferredToolsBlock(names []string) string {
 	return b.String()
 }
 
+// deferredFallbackLimit 是「严格 AND 零命中时」最多回退列出的工具数。
+// 取 12：够覆盖一次多工具提问（模型通常问 3–6 个），又不至于把几十个 MCP 工具
+// 的 schema 一次性灌进上下文（那正是 deferred 机制要避免的）。
+const deferredFallbackLimit = 12
+
 // NewSearchExtraTools builds the always-loaded discovery tool. deferred is the set
 // of tool names whose schemas are withheld; the tool searches those names in reg
 // and returns each match's name + description + params schema.
@@ -175,9 +180,21 @@ func NewSearchExtraTools(reg *Registry, deferred []string) CoreTool {
 					addByQuery(part)
 				}
 			} else {
-				// Multi-token keyword search: every space-separated token must appear
-				// in the normalised haystack (__ replaced by space for MCP tool names).
+				// Multi-token keyword search：先按严格 AND（每个 token 都要出现在同一个
+				// 工具的 name+description 里），AND 全军覆没时**退化为按命中数排序的 OR**。
+				//
+				// 为什么要退化：模型很自然会一次问多个工具名（"chrome-devtools navigate_page
+				// new_page list_pages"），而严格 AND 要求同一条描述同时包含这三件事——现实中
+				// 没有任何一个工具满足，于是整条查询零命中，模型据此断定"这些工具不可用"。
+				// 零命中时给出"命中最多的那几个"远比一句 No matching 有用：调用方本来就只是
+				// 想找工具，宽容的近似匹配不会带来副作用（真正调用仍要 ExecuteExtraTool 明确
+				// 指定名字）。
 				tokens := strings.Fields(strings.ToLower(q))
+				type scored struct {
+					name  string
+					score int
+				}
+				var ranked []scored
 				for _, name := range ordered {
 					t, ok := reg.Get(name)
 					if !ok {
@@ -187,15 +204,31 @@ func NewSearchExtraTools(reg *Registry, deferred []string) CoreTool {
 					// "mcp__scopesentry__list_projects".
 					haystack := strings.ReplaceAll(
 						strings.ToLower(t.Name()+" "+t.Description()), "__", " ")
-					allMatch := true
+					hits := 0
 					for _, tok := range tokens {
-						if !strings.Contains(haystack, tok) {
-							allMatch = false
-							break
+						if strings.Contains(haystack, tok) {
+							hits++
 						}
 					}
-					if allMatch {
+					if hits == len(tokens) {
 						addByFullName(name)
+					} else if hits > 0 {
+						ranked = append(ranked, scored{name: name, score: hits})
+					}
+				}
+				if len(matches) == 0 && len(ranked) > 0 {
+					// 命中数降序，同分按名字（结果稳定，缓存友好）。
+					sort.SliceStable(ranked, func(i, j int) bool {
+						if ranked[i].score != ranked[j].score {
+							return ranked[i].score > ranked[j].score
+						}
+						return ranked[i].name < ranked[j].name
+					})
+					if len(ranked) > deferredFallbackLimit {
+						ranked = ranked[:deferredFallbackLimit]
+					}
+					for _, r := range ranked {
+						addByFullName(r.name)
 					}
 				}
 			}

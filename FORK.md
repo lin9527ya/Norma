@@ -41,6 +41,15 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.8（2026-11-03）
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `tool/deferred.go` `NewSearchExtraTools` | 严格 AND 零命中时，退化为「按命中 token 数排序的 OR」，最多回退 12 条 | 模型很自然会一次问多个工具名（`"chrome-devtools navigate_page new_page list_pages"`）。严格 AND 要求**同一条** name+description 同时包含这三个 token，现实中没有任何工具满足，整条查询零命中；模型据此断定「这些工具不可用」。BLADE 任务 22 实测：deferred 浏览器工具装配正常（57 个），却因为这句 `No matching` 被判定为不可用。真正调用仍要 `ExecuteExtraTool` 明确指定名字，所以放宽发现阶段没有副作用。完全无关的查询仍然零命中。 |
+| `tool/deferred_test.go` | 回归：多工具提问必须有近似结果；无关查询仍零命中 | 两条一起钉住，避免回退退化成「问什么都给一堆」。 |
+
+> 消费方：所有把 MCP 工具标为 deferred 的宿主（BLADE 的 `def.Deferred`）。
+
 ### v0.5.7（2026-11-02）
 
 | 位置 | 差异 | 为什么 |
