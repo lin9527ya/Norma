@@ -178,7 +178,14 @@ type Options struct {
 	// Bash subprocesses (foreground + background), overriding inherited values.
 	// The agent's own process env is untouched. Empty = inherit unchanged. Used
 	// e.g. to route child-command HTTP through a proxy and trust its CA.
-	BashEnv []string
+	//
+	// BashEnvFunc, when non-nil, supersedes BashEnv and is evaluated before EVERY
+	// tool call: a host whose egress can change mid-run (proxy pool failover,
+	// startup probe) returns the current env instead of freezing the first
+	// snapshot for the whole session. The function must be safe for concurrent
+	// use; it is called from the tool-execution goroutine.
+	BashEnv     []string
+	BashEnvFunc func() []string
 
 	// Transcript, when non-nil, persists the conversation to an append-only
 	// JSONL log so the session can be resumed (see Session.Resume). Subagents
@@ -531,6 +538,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		MaxToolOutputChars: s.opts.MaxToolOutputChars,
 		Tasks:              s.tasks,
 		BashEnv:            s.opts.BashEnv,
+		BashEnvFunc:        s.opts.BashEnvFunc,
 		PermissionMode:     s.opts.PermissionMode,
 		Allowed:            s.opts.AllowedTools,
 		Disallowed:         s.opts.DisallowedTools,

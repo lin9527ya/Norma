@@ -68,7 +68,11 @@ type QueryInput struct {
 
 	// BashEnv holds extra "KEY=VALUE" entries injected into Bash subprocess
 	// environments (foreground + background). Empty = inherit unchanged.
-	BashEnv []string
+	//
+	// BashEnvFunc, when non-nil, supersedes BashEnv and is evaluated per tool
+	// call, so a host can follow a changing egress without rebuilding the loop.
+	BashEnv     []string
+	BashEnvFunc func() []string
 
 	// Permission policy.
 	PermissionMode     permission.Mode

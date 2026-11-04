@@ -82,6 +82,12 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 		}
 	}
 
+	bashEnv := l.in.BashEnv
+	if l.in.BashEnvFunc != nil {
+		// 每次工具调用现取：宿主的出口可能在 run 中途变化（代理池故障转移、
+		// 启动探测完成），一次性快照会让整轮 Bash 卡在旧值上。
+		bashEnv = l.in.BashEnvFunc()
+	}
 	tc := &tool.ToolContext{
 		WorkingDir:     l.in.WorkingDir,
 		AgentID:        l.in.AgentID,
@@ -90,7 +96,7 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 		OutputDir:      l.in.ToolOutputDir,
 		MaxOutputChars: l.in.MaxToolOutputChars,
 		Tasks:          l.in.Tasks,
-		Env:            l.in.BashEnv,
+		Env:            bashEnv,
 	}
 	// toolCtx carries the run's MaxDuration deadline, so a tool that overruns the
 	// wall-clock budget is interrupted here (the turn loop then enters wrap-up). During
