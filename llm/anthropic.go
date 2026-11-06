@@ -124,6 +124,10 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 		}
 		defer resp.Body.Close()
 		scan := newSSEScanner(resp.Body)
+		// 官方 Anthropic 在 message_start 报输入侧；部分兼容网关（如 opencode）在
+		// message_start 里给全 0、把真实输入放到 message_delta。只认 start 会让这些
+		// 网关的 input/cache 永远是 0——用这个标记决定 delta 的输入侧要不要补。
+		gotInput := false
 		for {
 			_, data, serr := scan.next()
 			if serr == io.EOF {
@@ -136,7 +140,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 			if data == "" {
 				continue
 			}
-			ev, ok, perr := parseAnthropicFrame(data)
+			ev, ok, perr := parseAnthropicFrame(data, &gotInput)
 			if perr != nil {
 				yield(StreamEvent{}, perr)
 				return
@@ -232,7 +236,7 @@ func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
 	return Message{Role: RoleAssistant, Content: blocks}, r.StopReason, usage, nil
 }
 
-func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
+func parseAnthropicFrame(data string, gotInput *bool) (StreamEvent, bool, error) {
 	var f struct {
 		Type         string `json:"type"`
 		ContentBlock struct {
@@ -269,6 +273,9 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 			// a placeholder (≈1), so drop it — the real output comes from message_delta.
 			u := f.Message.Usage.norm()
 			u.OutputTokens = 0
+			if u.InputTokens > 0 {
+				*gotInput = true
+			}
 			return StreamEvent{Type: SEMessageStart, Usage: u}, true, nil
 		}
 	case "content_block_start":
@@ -289,10 +296,17 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 	case "message_delta":
 		ev := StreamEvent{Type: SEMessageDelta, StopReason: f.Delta.StopReason}
 		if f.Usage != nil {
-			// Only output here — the input side (input/cache) was already counted at
-			// message_start; message_delta re-echoes it, so counting it again would
-			// double the input/cache totals.
-			ev.Usage = Usage{OutputTokens: f.Usage.OutputTokens}
+			u := f.Usage.norm()
+			// 官方 Anthropic 在 message_start 已报输入侧，delta 只是回显——再计一次
+			// 会把 input/cache 翻倍。但如果 start 给的是全 0（兼容网关），这里的输入
+			// 才是真的，补上并标记，避免后续 delta 重复补。
+			ev.Usage = Usage{OutputTokens: u.OutputTokens}
+			if !*gotInput && u.InputTokens > 0 {
+				ev.Usage.InputTokens = u.InputTokens
+				ev.Usage.CacheReadTokens = u.CacheReadTokens
+				ev.Usage.CacheWriteTokens = u.CacheWriteTokens
+				*gotInput = true
+			}
 		}
 		return ev, true, nil
 	case "message_stop":
