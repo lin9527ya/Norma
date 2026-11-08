@@ -317,7 +317,7 @@ func tokenSnapshotDelta(value int, previous *int) int {
 }
 
 func (s *anthropicUsageState) delta(u anthropicUsage, includeOutput bool) Usage {
-	read := tokenSnapshotDelta(u.CacheReadInputTokens, &s.cacheRead)
+	read := tokenSnapshotDelta(u.cacheRead(), &s.cacheRead)
 	write := tokenSnapshotDelta(u.CacheCreationInputTokens, &s.cacheWrite)
 	out := Usage{InputTokens: tokenSnapshotDelta(u.InputTokens, &s.input) + read + write,
 		CacheReadTokens: read, CacheWriteTokens: write}
@@ -328,10 +328,15 @@ func (s *anthropicUsageState) delta(u anthropicUsage, includeOutput bool) Usage 
 }
 
 type anthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	InputTokens              int             `json:"input_tokens"`
+	OutputTokens             int             `json:"output_tokens"`
+	CacheReadInputTokens     *int            `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int             `json:"cache_creation_input_tokens"`
+	Opencode                 json.RawMessage `json:"opencode"`
+}
+
+func (u anthropicUsage) cacheRead() int {
+	return firstTokenField(u.CacheReadInputTokens, gatewayCacheRead(u.Opencode))
 }
 
 // norm maps Anthropic usage to the canonical Usage. InputTokens is the TOTAL input
@@ -340,9 +345,9 @@ type anthropicUsage struct {
 // in. CacheReadTokens/CacheWriteTokens are the cached SUBSET (⊆ InputTokens).
 func (u anthropicUsage) norm() Usage {
 	return Usage{
-		InputTokens:      u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
+		InputTokens:      u.InputTokens + u.cacheRead() + u.CacheCreationInputTokens,
 		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  u.CacheReadInputTokens,
+		CacheReadTokens:  u.cacheRead(),
 		CacheWriteTokens: u.CacheCreationInputTokens,
 	}
 }

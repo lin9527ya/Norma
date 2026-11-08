@@ -41,6 +41,19 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.12（2026-11-08）：缓存字段兼容与 OpenAI 累计 usage
+
+| 位置 | 差异 | 为什么 |
+|---|---|---|
+| `llm/usage_snapshot.go`、`llm/openai.go` | OpenAI 缓存读取按标准 `prompt_tokens_details.cached_tokens` → DeepSeek `prompt_cache_hit_tokens` → 已知网关 `opencode.tokens.cache_read` 选择；流式与非流式共用归一化 | 未识别字段曾导致输入/输出正常但缓存恒零。别名是替代来源，不能相加；同帧标准字段明确给零也不当作缺失。OpenAI 的输入已经包含缓存，不另加缓存读取。 |
+| `llm/openai.go` | 每个 HTTP 响应内逐字段维护累计 usage 高水位，只在流结束时发一次最终快照；新请求和空响应重试独立 | 后帧缺缓存/输入曾把旧计量清零；累计 output 的重复或回退不应双计。 |
+| `llm/anthropic.go` | 标准缓存读取字段缺失时兼容 `opencode.tokens.cache_read`，保留逐字段增量与非流式同口径 | 标准字段优先，不能把明确的零覆盖成任意更大的扩展值。Anthropic 输入按非缓存输入 + 缓存读/写归一化。 |
+| `llm/cache_usage_compat_test.go` | 覆盖别名优先级、明确零、缺字段、迟报/重复/回退、请求隔离、并发与空响应重试 | 全部使用本地 fake HTTP，不调用真实模型。 |
+
+> 本轮不猜测 `opencode.tokens.input/output` 或缓存写入时限桶的语义，不把缺失输入补成估算值。
+> 这里只修已确认的缓存读取别名与累计快照兼容；不能仅据修复推定某个 VPS 的真实零命中根因已解决。
+
+
 ### v0.5.8（2026-11-03）
 
 | 位置 | 差异 | 为什么 |
