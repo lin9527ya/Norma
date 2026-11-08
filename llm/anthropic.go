@@ -124,10 +124,8 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 		}
 		defer resp.Body.Close()
 		scan := newSSEScanner(resp.Body)
-		// 官方 Anthropic 在 message_start 报输入侧；部分兼容网关（如 opencode）在
-		// message_start 里给全 0、把真实输入放到 message_delta。只认 start 会让这些
-		// 网关的 input/cache 永远是 0——用这个标记决定 delta 的输入侧要不要补。
-		gotInput := false
+		// 逐字段合并当前请求的累计 usage，兼容迟报缓存和重复快照。
+		usage := anthropicUsageState{}
 		for {
 			_, data, serr := scan.next()
 			if serr == io.EOF {
@@ -140,7 +138,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 			if data == "" {
 				continue
 			}
-			ev, ok, perr := parseAnthropicFrame(data, &gotInput)
+			ev, ok, perr := parseAnthropicFrame(data, &usage)
 			if perr != nil {
 				yield(StreamEvent{}, perr)
 				return
@@ -236,7 +234,7 @@ func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
 	return Message{Role: RoleAssistant, Content: blocks}, r.StopReason, usage, nil
 }
 
-func parseAnthropicFrame(data string, gotInput *bool) (StreamEvent, bool, error) {
+func parseAnthropicFrame(data string, usage *anthropicUsageState) (StreamEvent, bool, error) {
 	var f struct {
 		Type         string `json:"type"`
 		ContentBlock struct {
@@ -266,17 +264,8 @@ func parseAnthropicFrame(data string, gotInput *bool) (StreamEvent, bool, error)
 	switch f.Type {
 	case "message_start":
 		if f.Message.Usage != nil {
-			// Anthropic reports the full input side (input + cache read/creation) in
-			// BOTH message_start and message_delta. To avoid double-counting when the
-			// accumulator folds both events, message_start carries ONLY the input side
-			// and message_delta carries ONLY output. The initial output_tokens here is
-			// a placeholder (≈1), so drop it — the real output comes from message_delta.
-			u := f.Message.Usage.norm()
-			u.OutputTokens = 0
-			if u.InputTokens > 0 {
-				*gotInput = true
-			}
-			return StreamEvent{Type: SEMessageStart, Usage: u}, true, nil
+			// 起始 output 通常是占位值，不参与累计；输入/缓存按字段跟踪。
+			return StreamEvent{Type: SEMessageStart, Usage: usage.delta(*f.Message.Usage, false)}, true, nil
 		}
 	case "content_block_start":
 		if f.ContentBlock.Type == "tool_use" {
@@ -296,17 +285,7 @@ func parseAnthropicFrame(data string, gotInput *bool) (StreamEvent, bool, error)
 	case "message_delta":
 		ev := StreamEvent{Type: SEMessageDelta, StopReason: f.Delta.StopReason}
 		if f.Usage != nil {
-			u := f.Usage.norm()
-			// 官方 Anthropic 在 message_start 已报输入侧，delta 只是回显——再计一次
-			// 会把 input/cache 翻倍。但如果 start 给的是全 0（兼容网关），这里的输入
-			// 才是真的，补上并标记，避免后续 delta 重复补。
-			ev.Usage = Usage{OutputTokens: u.OutputTokens}
-			if !*gotInput && u.InputTokens > 0 {
-				ev.Usage.InputTokens = u.InputTokens
-				ev.Usage.CacheReadTokens = u.CacheReadTokens
-				ev.Usage.CacheWriteTokens = u.CacheWriteTokens
-				*gotInput = true
-			}
+			ev.Usage = usage.delta(*f.Usage, true)
 		}
 		return ev, true, nil
 	case "message_stop":
@@ -319,6 +298,33 @@ func parseAnthropicFrame(data string, gotInput *bool) (StreamEvent, bool, error)
 		return StreamEvent{}, false, fmt.Errorf("anthropic: %s", msg)
 	}
 	return StreamEvent{}, false, nil
+}
+
+// Anthropic usage 是当前请求的累计快照，官方和兼容网关可在不同帧补报字段。
+// 用字段级高水位只发增量：start 有 input 不等于它已经给出了最终 cache，重复 delta
+// 的 output 也不能再次相加。每个 HTTP 请求各持有一份状态，不跨会话共享。
+type anthropicUsageState struct {
+	input, output, cacheRead, cacheWrite int
+}
+
+func tokenSnapshotDelta(value int, previous *int) int {
+	if value <= *previous {
+		return 0
+	}
+	delta := value - *previous
+	*previous = value
+	return delta
+}
+
+func (s *anthropicUsageState) delta(u anthropicUsage, includeOutput bool) Usage {
+	read := tokenSnapshotDelta(u.CacheReadInputTokens, &s.cacheRead)
+	write := tokenSnapshotDelta(u.CacheCreationInputTokens, &s.cacheWrite)
+	out := Usage{InputTokens: tokenSnapshotDelta(u.InputTokens, &s.input) + read + write,
+		CacheReadTokens: read, CacheWriteTokens: write}
+	if includeOutput {
+		out.OutputTokens = tokenSnapshotDelta(u.OutputTokens, &s.output)
+	}
+	return out
 }
 
 type anthropicUsage struct {
