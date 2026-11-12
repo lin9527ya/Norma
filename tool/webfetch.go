@@ -31,6 +31,21 @@ type WebFetchConfig struct {
 	// InsecureTLS skips TLS certificate verification entirely (equivalent to
 	// curl -k). A blunt fallback when no CA cert is available; prefer CACert.
 	InsecureTLS bool
+	// UserAgent overrides the request User-Agent. Empty uses the neutral browser
+	// default; hosts that need a target-appropriate identity can set it explicitly.
+	UserAgent string
+}
+
+// defaultWebFetchUserAgent 是 WebFetch 的默认 UA。刻意不用 "norma/x.y" 之类的
+// 客户端标识：WebFetch 的目标是外部站点，默认值必须像一个普通浏览器，不能把
+// 平台/客户端身份写给目标、客户或蓝队看。
+const defaultWebFetchUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+func webFetchUserAgent(cfg WebFetchConfig) string {
+	if ua := strings.TrimSpace(cfg.UserAgent); ua != "" {
+		return ua
+	}
+	return defaultWebFetchUserAgent
 }
 
 // NewWebFetch builds the WebFetch tool: fetches a URL over HTTP(S) and returns
@@ -185,14 +200,14 @@ func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *
 		if err != nil {
 			return Errorf("Error: " + err.Error()), nil
 		}
-		req.Header.Set("user-agent", "norma/0.4")
+		req.Header.Set("User-Agent", webFetchUserAgent(cfg))
 		resp, err := client.Do(req)
 		// One direct retry when the proxied attempt failed for a proxy-caused reason.
 		// A non-proxy error (bad host, caller timeout/cancel) is returned as-is — a
 		// direct retry wouldn't fix it. The direct response is NOT captured by the proxy.
 		if err != nil && direct != nil && proxyLikelyErr(err) {
 			if r2, e2 := http.NewRequestWithContext(cctx, http.MethodGet, in.URL, nil); e2 == nil {
-				r2.Header.Set("user-agent", "norma/0.4")
+				r2.Header.Set("User-Agent", webFetchUserAgent(cfg))
 				if resp2, err2 := direct.Do(r2); err2 == nil {
 					resp, err = resp2, nil
 				} else {
