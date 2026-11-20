@@ -41,6 +41,10 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.14（2026-11-20）：正式发版（承接 `v0.5.13` 全套 KV 缓存优化）
+
+- 基于 `v0.5.13`（`e03244a`）正式发布 `v0.5.14` 版本，规避此前 `v0.5.13-0.20261112130025-de8aa8f206f9` 伪版本前缀造成的版本号混淆，提供干净的正式 release tag 与发行说明。
+
 ### v0.5.13（2026-11-20）：KV 缓存命中率优化（P0-P2）
 
 - **`compaction/compaction.go`（`Config.MicroCompactMinClear`）**：支持按批量阈值跳过逐轮单条清理（仅当可清数量 ≥ `MicroCompactMinClear` 或临近 `autoThreshold`/预测溢出时才统一清），消除 60%–90% 窗口内每轮 1 次的前缀 KV 失效；默认 0 保持原有行为。
