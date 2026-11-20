@@ -71,6 +71,69 @@ func TestSettlementOnBudgetHit(t *testing.T) {
 	}
 }
 
+func TestSettlementKeepToolSchemasPreservesToolsAndBlocksExecution(t *testing.T) {
+	var toolsSeen [][]string
+	var blockedMsg string
+	turns := [][]llm.StreamEvent{
+		toolTurn("a", "Bash", `{"command":"echo 1"}`), // turn 1 -> hits MaxTurns=1
+		toolTurn("b", "Bash", `{"command":"echo 2"}`), // settlement turn 1 tries Bash -> blocked at execution
+		textTurn("done"),                              // settlement turn 2 stops
+	}
+	call := func(_ context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+		names := make([]string, 0, len(req.Tools))
+		for _, ts := range req.Tools {
+			names = append(names, ts.Name)
+		}
+		i := len(toolsSeen)
+		toolsSeen = append(toolsSeen, names)
+		if i == 2 {
+			// Check that the previous turn returned the disabled tool error result.
+			last := req.Messages[len(req.Messages)-1]
+			for _, b := range last.Content {
+				if b.Type == llm.BlockToolResult && b.ToolUseID == "b" {
+					for _, inner := range b.Content {
+						blockedMsg += inner.Text
+					}
+				}
+			}
+		}
+		evs := turns[i]
+		return func(yield func(llm.StreamEvent, error) bool) {
+			for _, ev := range evs {
+				if !yield(ev, nil) {
+					return
+				}
+			}
+		}
+	}
+	in := QueryInput{
+		Messages:       []llm.Message{llm.UserText("go")},
+		Tools:          tool.NewRegistry(tool.NewBash()),
+		PermissionMode: permission.ModeBypass,
+		WorkingDir:     t.TempDir(),
+		MaxTurns:       1,
+		Settlement: &Settlement{
+			Prompt:          "SETTLE_NOW",
+			MaxTurns:        2,
+			DisabledTools:   []string{"Bash"},
+			KeepToolSchemas: true,
+		},
+	}
+	term := drain(t, in, QueryDeps{CallModel: call})
+	if term.Reason != ReasonMaxTurns {
+		t.Fatalf("reason=%v, want ReasonMaxTurns", term.Reason)
+	}
+	if len(toolsSeen) < 3 {
+		t.Fatalf("calls=%d, want 3", len(toolsSeen))
+	}
+	if !contains(toolsSeen[1], "Bash") || !contains(toolsSeen[2], "Bash") {
+		t.Fatalf("KeepToolSchemas must preserve Bash schema across settlement: %v", toolsSeen)
+	}
+	if !strings.Contains(blockedMsg, `tool "Bash" is disabled during wrap-up`) {
+		t.Fatalf("expected execution block message, got %q", blockedMsg)
+	}
+}
+
 // With no Settlement, hitting the budget finishes immediately (unchanged behavior).
 func TestNoSettlementFinishesImmediately(t *testing.T) {
 	m := &scriptedModel{turns: [][]llm.StreamEvent{

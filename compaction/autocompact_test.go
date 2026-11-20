@@ -212,6 +212,51 @@ func TestPreMicroOnlyBand(t *testing.T) {
 	}
 }
 
+func TestPreMicroBatchMinClear(t *testing.T) {
+	rs := &recSummarizer{}
+	c := New(Config{
+		ContextWindow:        100000,
+		MaxOutputTokens:      4000,
+		KeepRecent:           2,
+		MicroCompactMinClear: 3,
+	}, rs.fn)
+
+	// 1 clearable outside microKeepRecent (< 3) → skipped to preserve KV cache.
+	msgs := manyReadPairs(microKeepRecent + 1)
+	out := c.Pre(context.Background(), msgs, 60000)
+	if countCleared(out) != 0 {
+		t.Fatalf("expected batch gate to skip 1 clearable item, cleared=%d", countCleared(out))
+	}
+
+	// 2 clearable (< 3) → still skipped.
+	msgs2 := manyReadPairs(microKeepRecent + 2)
+	out2 := c.Pre(context.Background(), msgs2, 60000)
+	if countCleared(out2) != 0 {
+		t.Fatalf("expected batch gate to skip 2 clearable items, cleared=%d", countCleared(out2))
+	}
+
+	// 3 clearable (>= 3) → clears all 3 at once.
+	msgs3 := manyReadPairs(microKeepRecent + 3)
+	out3 := c.Pre(context.Background(), msgs3, 60000)
+	if countCleared(out3) != 3 {
+		t.Fatalf("expected batch gate to clear all 3 items at once, cleared=%d", countCleared(out3))
+	}
+
+	// Next turn with 1 more item (only 1 uncleared!) → skipped again.
+	msgs4 := append(out3, manyReadPairs(1)...)
+	out4 := c.Pre(context.Background(), msgs4, 60000)
+	if countCleared(out4) != 3 {
+		t.Fatalf("expected 4th uncleared item alone to stay uncleared, cleared=%d", countCleared(out4))
+	}
+
+	// Near autoThreshold (85000 >= auto=83000): flushes remaining 1 even if < 3.
+	msgsWithSmallAuto := manyReadPairs(microKeepRecent + 1)
+	outFlush := c.Pre(context.Background(), msgsWithSmallAuto, 85000)
+	if countCleared(outFlush) != 1 {
+		t.Fatalf("expected flush right before AutoCompact, cleared=%d", countCleared(outFlush))
+	}
+}
+
 func TestPreAutoNilSummarizerNoBoundary(t *testing.T) {
 	c := New(Config{ContextWindow: 200000, MaxOutputTokens: 8000, KeepRecent: 2}, nil)
 	var msgs []llm.Message

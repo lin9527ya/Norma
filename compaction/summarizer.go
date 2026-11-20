@@ -21,6 +21,20 @@ const (
 // offered; the no-tools guardrails live in the user prompt (§7).
 const summarySystemPrompt = "You are a helpful AI assistant tasked with summarizing conversations."
 
+// SummaryPrefix supplies the caller's live System/DynamicBoundary/Tools/PromptCacheKey
+// so compaction's summary request shares the cached KV prefix with the main agent loop
+// instead of cold-prefilling the entire history under a bespoke system prompt.
+type SummaryPrefix struct {
+	System          []string
+	DynamicBoundary int
+	Tools           []llm.ToolSchema
+	PromptCacheKey  string
+	// PreserveThinking leaves CompletionRequest.Thinking empty instead of forcing
+	// "disabled", avoiding a thinking-mode cache key change when the session uses
+	// extended thinking.
+	PreserveThinking bool
+}
+
 // ProviderSummarizer builds a Summarizer backed by an llm.Provider. It replays
 // the real conversation messages (not a rendered text transcript) followed by the
 // summary-request user message, with thinking disabled and output capped at
@@ -28,6 +42,13 @@ const summarySystemPrompt = "You are a helpful AI assistant tasked with summariz
 // (MAX_COMPACT_STREAMING_RETRIES) and, if the summary request itself overflows,
 // drops the oldest API-round groups and retries (MAX_PTL_RETRIES).
 func ProviderSummarizer(p llm.Provider, maxOutputTokens int, nonStreaming bool) Summarizer {
+	return ProviderSummarizerWithPrefix(p, maxOutputTokens, nonStreaming, SummaryPrefix{})
+}
+
+// ProviderSummarizerWithPrefix behaves like ProviderSummarizer, while preserving
+// prefix's System, DynamicBoundary, Tools, and PromptCacheKey so AutoCompact
+// hits the main session's warm prefix KV cache instead of cold-prefilling from 0%.
+func ProviderSummarizerWithPrefix(p llm.Provider, maxOutputTokens int, nonStreaming bool, prefix SummaryPrefix) Summarizer {
 	maxOut := compactMaxOutputTokens
 	if maxOutputTokens > 0 && maxOutputTokens < maxOut {
 		maxOut = maxOutputTokens
@@ -36,7 +57,7 @@ func ProviderSummarizer(p llm.Provider, maxOutputTokens int, nonStreaming bool) 
 		work := pairForReplay(msgs)
 		var lastErr error
 		for attempt := 0; attempt <= maxPTLRetries; attempt++ {
-			raw, err := streamSummary(ctx, p, maxOut, work, nonStreaming)
+			raw, err := streamSummary(ctx, p, maxOut, work, nonStreaming, prefix)
 			if err == nil {
 				return formatCompactSummary(raw), nil
 			}
@@ -57,15 +78,27 @@ func ProviderSummarizer(p llm.Provider, maxOutputTokens int, nonStreaming bool) 
 // streamSummary issues one summary request (head + summary-request message),
 // retrying transient (non-overflow) stream failures. Overflow is returned
 // immediately so the caller can truncate and retry at a coarser granularity.
-func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.Message, nonStreaming bool) (string, error) {
+func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.Message, nonStreaming bool, prefix SummaryPrefix) (string, error) {
 	reqMsgs := make([]llm.Message, 0, len(head)+1)
 	reqMsgs = append(reqMsgs, head...)
 	reqMsgs = append(reqMsgs, llm.UserText(compactPrompt))
 	req := llm.CompletionRequest{
-		System:    []string{summarySystemPrompt},
-		Messages:  reqMsgs,
-		MaxTokens: maxOut,
-		Thinking:  "disabled",
+		System:         []string{summarySystemPrompt},
+		Messages:       reqMsgs,
+		MaxTokens:      maxOut,
+		Thinking:       "disabled",
+		PromptCacheKey: prefix.PromptCacheKey,
+	}
+	hasCustomPrefix := len(prefix.System) > 0 || len(prefix.Tools) > 0
+	if len(prefix.System) > 0 {
+		req.System = prefix.System
+		req.DynamicBoundary = prefix.DynamicBoundary
+	}
+	if len(prefix.Tools) > 0 {
+		req.Tools = prefix.Tools
+	}
+	if prefix.PreserveThinking {
+		req.Thinking = ""
 	}
 	var lastErr error
 	for range maxStreamingRetries {
@@ -73,10 +106,12 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 			return "", ctx.Err()
 		}
 		var text string
+		var hasToolCalls bool
 		var callErr error
 		if nonStreaming {
 			msg, _, _, err := p.Complete(ctx, req)
 			text, callErr = msg.Text(), err
+			hasToolCalls = len(msg.ToolUses()) > 0
 		} else {
 			acc := llm.NewAccumulator()
 			for ev, err := range p.Stream(ctx, req) {
@@ -87,8 +122,20 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 				acc.Add(ev)
 			}
 			if callErr == nil {
-				text = acc.Message().Text()
+				msg := acc.Message()
+				text = msg.Text()
+				hasToolCalls = len(msg.ToolUses()) > 0
 			}
+		}
+		// Defensive fallback: if the model emitted only tool_use despite the
+		// no-tools prompt when sharing the parent's tool schemas, retry once with
+		// the standalone no-tools summarizer request.
+		if callErr == nil && strings.TrimSpace(text) == "" && hasToolCalls && hasCustomPrefix {
+			req.System = []string{summarySystemPrompt}
+			req.DynamicBoundary = 0
+			req.Tools = nil
+			hasCustomPrefix = false
+			continue
 		}
 		if callErr == nil {
 			return text, nil

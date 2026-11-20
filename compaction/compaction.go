@@ -42,6 +42,11 @@ type Config struct {
 	// KeepRecent is the number of recent messages AutoCompact always preserves as
 	// the un-summarized tail (default 8). MicroCompact uses its own microKeepRecent.
 	KeepRecent int
+	// MicroCompactMinClear batches MicroCompact clearing to preserve KV cache:
+	// when > 1, Pre skips MicroCompact unless at least MicroCompactMinClear
+	// uncleared compactable tool results sit outside microKeepRecent (or until
+	// AutoCompact is about to trigger). Default 0 clears on every qualifying turn.
+	MicroCompactMinClear int
 }
 
 func (c *Config) defaults() {
@@ -181,9 +186,15 @@ func (c *Compactor) Pre(ctx context.Context, msgs []llm.Message, lastInputTokens
 	// MicroCompact: clear old COMPACTABLE tool results (non-destructive). Only
 	// re-estimate when it actually changed the array; otherwise the gate count
 	// (which prefers the accurate last-response size) still holds.
-	if out, changed := c.microCompact(msgs); changed {
+	if out, changed := c.microCompactWithMin(msgs, c.cfg.MicroCompactMinClear); changed {
 		msgs = out
 		tok = c.count(msgs, 0)
+	} else if c.cfg.MicroCompactMinClear > 1 && (tok >= c.autoThreshold() || c.predictiveOver(tok)) {
+		// Flush held-back compactable results right before resorting to AutoCompact.
+		if out, changed := c.microCompactWithMin(msgs, 0); changed {
+			msgs = out
+			tok = c.count(msgs, 0)
+		}
 	}
 	// AutoCompact: at the threshold, or predictively if the next turn would overflow.
 	if tok >= c.autoThreshold() || c.predictiveOver(tok) {
@@ -247,6 +258,10 @@ func lastNNonMarkerStart(msgs []llm.Message, keep int) int {
 // recent microKeepRecent, returning the (possibly new) message slice and whether
 // anything changed. It is non-destructive: a cleared result can be re-read.
 func (c *Compactor) microCompact(msgs []llm.Message) ([]llm.Message, bool) {
+	return c.microCompactWithMin(msgs, 0)
+}
+
+func (c *Compactor) microCompactWithMin(msgs []llm.Message, minClear int) ([]llm.Message, bool) {
 	// Collect compactable tool_use ids in encounter order.
 	var ids []string
 	for _, m := range msgs {
@@ -262,6 +277,19 @@ func (c *Compactor) microCompact(msgs []llm.Message) ([]llm.Message, bool) {
 	clearSet := make(map[string]bool, len(ids)-microKeepRecent)
 	for _, id := range ids[:len(ids)-microKeepRecent] {
 		clearSet[id] = true
+	}
+	if minClear > 1 {
+		pending := 0
+		for i := range msgs {
+			for _, b := range msgs[i].Content {
+				if b.Type == llm.BlockToolResult && clearSet[b.ToolUseID] && !isCleared(b.Content) {
+					pending++
+				}
+			}
+		}
+		if pending < minClear {
+			return msgs, false
+		}
 	}
 	changed := false
 	out := append([]llm.Message(nil), msgs...)

@@ -262,3 +262,80 @@ func TestProviderSummarizerNonOverflowErrorSurfaces(t *testing.T) {
 		t.Fatalf("want %d stream attempts, got %d", maxStreamingRetries, len(p.reqs))
 	}
 }
+
+type toolThenTextProvider struct {
+	reqs []llm.CompletionRequest
+}
+
+func (p *toolThenTextProvider) Stream(_ context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	p.reqs = append(p.reqs, req)
+	call := len(p.reqs)
+	return func(yield func(llm.StreamEvent, error) bool) {
+		if call == 1 {
+			if !yield(llm.StreamEvent{Type: llm.SEToolUseStart, ToolID: "t1", ToolName: "Bash"}, nil) {
+				return
+			}
+			yield(llm.StreamEvent{Type: llm.SEMessageStop}, nil)
+			return
+		}
+		if !yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "<summary>PREFIX_OK</summary>"}, nil) {
+			return
+		}
+		yield(llm.StreamEvent{Type: llm.SEMessageStop}, nil)
+	}
+}
+
+func (p *toolThenTextProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	acc := llm.NewAccumulator()
+	for ev, err := range p.Stream(ctx, req) {
+		if err != nil {
+			return llm.Message{}, "", llm.Usage{}, err
+		}
+		acc.Add(ev)
+	}
+	return acc.Message(), acc.StopReason, acc.Usage, nil
+}
+
+func TestProviderSummarizerWithPrefixSharesPrefixAndFallsBackOnToolOnly(t *testing.T) {
+	prefix := SummaryPrefix{
+		System:          []string{"static-sys", "dynamic-sys"},
+		DynamicBoundary: 1,
+		Tools:           []llm.ToolSchema{{Name: "Bash", InputSchema: map[string]any{"type": "object"}}},
+		PromptCacheKey:  "sess-compact",
+	}
+
+	// Normal case: summary shares parent System, DynamicBoundary, Tools, and PromptCacheKey.
+	p := &captureProvider{reply: "<summary>SHARED</summary>"}
+	s := ProviderSummarizerWithPrefix(p, 8000, false, prefix)
+	got, err := s(context.Background(), []llm.Message{llm.UserText("hi"), asstText("hello")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Summary:\nSHARED" {
+		t.Fatalf("got %q", got)
+	}
+	req := p.reqs[0]
+	if len(req.System) != 2 || req.System[0] != "static-sys" || req.DynamicBoundary != 1 {
+		t.Fatalf("prefix system/boundary lost: %+v", req)
+	}
+	if len(req.Tools) != 1 || req.Tools[0].Name != "Bash" {
+		t.Fatalf("prefix tools lost: %+v", req.Tools)
+	}
+	if req.PromptCacheKey != "sess-compact" {
+		t.Fatalf("PromptCacheKey=%q", req.PromptCacheKey)
+	}
+
+	// Fallback case: if model emits only tool_use with empty text, falls back to standalone no-tools summary.
+	fp := &toolThenTextProvider{}
+	sf := ProviderSummarizerWithPrefix(fp, 8000, false, prefix)
+	got2, err := sf(context.Background(), []llm.Message{llm.UserText("hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2 != "Summary:\nPREFIX_OK" || len(fp.reqs) != 2 {
+		t.Fatalf("got=%q calls=%d", got2, len(fp.reqs))
+	}
+	if len(fp.reqs[1].Tools) != 0 || fp.reqs[1].System[0] != summarySystemPrompt {
+		t.Fatalf("fallback request should drop tools & custom system: %+v", fp.reqs[1])
+	}
+}

@@ -144,10 +144,21 @@ type Options struct {
 	AskUser tool.AskUserFunc
 
 	// SystemReminderFunc, when set, is called before each Prompt and its return
-	// value is included in the <system-reminder> prepended to the conversation.
-	// The SDK always injects today's date into the reminder regardless of whether
-	// this is set. Return "" to include only the date.
+	// value is included in the <system-reminder> injected into the request.
+	// By default the SDK pins today's date at session creation so active sessions
+	// do not invalidate KV caches at midnight. Set OmitCurrentDateReminder to
+	// omit the date completely (and skip empty reminders).
 	SystemReminderFunc func() string
+	// OmitCurrentDateReminder omits the default `# currentDate` line from the
+	// SDK's <system-reminder>. When SystemReminderFunc is also nil or returns "",
+	// no reminder message is injected at all (preserving 100% message prefix cache).
+	OmitCurrentDateReminder bool
+	// SystemReminderAtTail appends the <system-reminder> message after Messages
+	// instead of prepending at index 0.
+	SystemReminderAtTail bool
+	// PromptCacheKey is forwarded on model requests for OpenAI / Responses
+	// prefix-cache affinity.
+	PromptCacheKey string
 
 	MaxTurns int
 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
@@ -254,11 +265,12 @@ type Session struct {
 	messages  []llm.Message
 	usage     llm.Usage
 
-	sessionID string
-	store     *transcript.Store
-	writer    *transcript.Writer
-	tasks     *tool.Manager
-	unlock    *tool.UnlockSet // deferred-tool call gate (nil when no deferred tools)
+	sessionID   string
+	sessionDate string
+	store       *transcript.Store
+	writer      *transcript.Writer
+	tasks       *tool.Manager
+	unlock      *tool.UnlockSet // deferred-tool call gate (nil when no deferred tools)
 }
 
 // NewSession builds a Session, applying defaults.
@@ -271,6 +283,9 @@ func NewSession(opts Options) *Session {
 		opts.PermissionMode = permission.ModeDefault
 	}
 	s := &Session{opts: opts}
+	if !opts.OmitCurrentDateReminder {
+		s.sessionDate = time.Now().Format("2006-01-02")
+	}
 	// Exactly one context manager. Compactor (host-supplied) wins over the
 	// built-in Compaction: a session holds a single compactor, so the two can
 	// never both run — which matters because they have incompatible contracts
@@ -281,8 +296,6 @@ func NewSession(opts Options) *Session {
 				"They are mutually exclusive context managers; set only one.")
 		}
 		s.compactor = opts.Compactor
-	} else if opts.Compaction != nil {
-		s.compactor = compaction.New(*opts.Compaction, compaction.ProviderSummarizer(opts.Provider, opts.MaxTokens, opts.NonStreaming))
 	}
 	if opts.Plan != nil {
 		start := opts.PermissionMode
@@ -346,7 +359,41 @@ func NewSession(opts Options) *Session {
 		s.store = opts.Transcript
 		s.writer = s.store.NewWriter(s.sessionID, "")
 	}
+	if opts.Compactor == nil && opts.Compaction != nil {
+		s.compactor = compaction.New(*opts.Compaction, compaction.ProviderSummarizerWithPrefix(
+			opts.Provider,
+			opts.MaxTokens,
+			opts.NonStreaming,
+			compaction.SummaryPrefix{
+				System:          s.system(),
+				DynamicBoundary: opts.DynamicBoundary,
+				Tools:           visibleSchemas(s.registry, opts.DeferredTools),
+				PromptCacheKey:  opts.PromptCacheKey,
+			},
+		))
+	}
 	return s
+}
+
+func visibleSchemas(reg *tool.Registry, deferred []string) []llm.ToolSchema {
+	if reg == nil {
+		return nil
+	}
+	all := reg.Schemas()
+	if len(deferred) == 0 {
+		return all
+	}
+	blocked := make(map[string]bool, len(deferred))
+	for _, name := range deferred {
+		blocked[name] = true
+	}
+	out := make([]llm.ToolSchema, 0, len(all))
+	for _, ts := range all {
+		if !blocked[ts.Name] {
+			out = append(out, ts)
+		}
+	}
+	return out
 }
 
 // Close releases session resources, killing any background tasks and removing
@@ -428,14 +475,19 @@ func cleanResumed(msgs []llm.Message) []llm.Message {
 	return msgs
 }
 
-// buildSystemReminder assembles the <system-reminder> content. Today's date is
-// always included; extra is appended when non-empty.
-func buildSystemReminder(extra string) string {
-	date := time.Now().Format("2006-01-02")
+// buildSystemReminder assembles the <system-reminder> content. When both date
+// and extra are empty, it returns "" so callers can skip injecting a reminder.
+func buildSystemReminder(date, extra string) string {
+	if date == "" && extra == "" {
+		return ""
+	}
 	var b strings.Builder
-	b.WriteString("<system-reminder>\n# currentDate\nToday's date is ")
-	b.WriteString(date)
-	b.WriteString(".")
+	b.WriteString("<system-reminder>")
+	if date != "" {
+		b.WriteString("\n# currentDate\nToday's date is ")
+		b.WriteString(date)
+		b.WriteString(".")
+	}
 	if extra != "" {
 		b.WriteString("\n")
 		b.WriteString(extra)
@@ -519,12 +571,14 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		reminderExtra = s.opts.SystemReminderFunc()
 	}
 	in := harness.QueryInput{
-		Provider:           s.opts.Provider,
-		System:             s.system(),
-		DynamicBoundary:    s.opts.DynamicBoundary,
-		Messages:           s.messages,
-		SystemReminder:     buildSystemReminder(reminderExtra),
-		Tools:              s.registry,
+		Provider:             s.opts.Provider,
+		System:               s.system(),
+		DynamicBoundary:      s.opts.DynamicBoundary,
+		Messages:             s.messages,
+		SystemReminder:       buildSystemReminder(s.sessionDate, reminderExtra),
+		SystemReminderAtTail: s.opts.SystemReminderAtTail,
+		PromptCacheKey:       s.opts.PromptCacheKey,
+		Tools:                s.registry,
 		DeferredTools:      s.opts.DeferredTools,
 		MaxTokens:          s.opts.MaxTokens,
 		Temperature:        s.opts.Temperature,

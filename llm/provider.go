@@ -107,6 +107,28 @@ type Config struct {
 	// themselves ("max_tokens" / "max_output_tokens").
 	MaxTokensField string
 
+	// InputTokensIncludesCache tells the Anthropic adapter that raw
+	// usage.input_tokens ALREADY includes cache_read_input_tokens and
+	// cache_creation_input_tokens (common on OpenAI/DeepSeek-to-Anthropic relays),
+	// so norm/delta must not add them again. Ignored for OpenAI formats.
+	InputTokensIncludesCache bool
+
+	// PreserveThinkingBlocks keeps historical BlockThinking blocks on Anthropic
+	// requests when ThinkingType is unset (e.g. gateways that enable thinking
+	// server-side by default) unless req.Thinking == "disabled".
+	PreserveThinkingBlocks bool
+
+	// CacheBreakpoints controls extra Anthropic cache_control breakpoints beyond
+	// the system prefix (DynamicBoundary): "" = system only (legacy default);
+	// "rolling" = mark last tool schema plus up to 2 rolling message breakpoints
+	// (within Anthropic's 4-breakpoint limit). Ignored for OpenAI formats.
+	CacheBreakpoints string
+
+	// DisablePromptCacheKey suppresses "prompt_cache_key" on OpenAI / Responses
+	// requests even when CompletionRequest.PromptCacheKey is populated (for strict
+	// third-party proxies that reject unknown body fields).
+	DisablePromptCacheKey bool
+
 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
 }
 

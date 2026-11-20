@@ -141,4 +141,7 @@ type CompletionRequest struct {
 	// tokens on reasoning and never replays thinking blocks (which Anthropic
 	// rejects when thinking is off).
 	Thinking string
+	// PromptCacheKey is an opaque session/prefix routing hint passed to OpenAI
+	// Chat Completions and Responses APIs as "prompt_cache_key". Empty omits it.
+	PromptCacheKey string
 }

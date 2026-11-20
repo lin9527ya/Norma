@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,5 +92,75 @@ func TestRunConvenience(t *testing.T) {
 	}
 	if out != "hello" {
 		t.Fatalf("out=%q", out)
+	}
+}
+
+func TestOmitCurrentDateReminderAndPromptCacheKey(t *testing.T) {
+	var seenMsgs [][]llm.Message
+	var seenKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages       []map[string]any `json:"messages"`
+			PromptCacheKey string           `json:"prompt_cache_key"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seenKey = body.PromptCacheKey
+		var ms []llm.Message
+		for _, m := range body.Messages {
+			if m["role"] == "system" {
+				continue
+			}
+			role, _ := m["role"].(string)
+			text, _ := m["content"].(string)
+			ms = append(ms, llm.Message{Role: llm.Role(role), Content: []llm.ContentBlock{llm.TextBlock(text)}})
+		}
+		seenMsgs = append(seenMsgs, ms)
+		w.Write([]byte(sse(
+			`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`, ``,
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`, ``,
+			`data: [DONE]`, ``,
+		)))
+	}))
+	defer srv.Close()
+
+	prov, _ := llm.NewProvider(llm.Config{Format: llm.FormatOpenAI, BaseURL: srv.URL, APIKey: "k", Model: "m"})
+
+	// 1. OmitCurrentDateReminder with no SystemReminderFunc sends NO <system-reminder> message.
+	s1 := NewSession(Options{
+		Provider:                prov,
+		SystemPrompt:            []string{"sys"},
+		Tools:                   []tool.CoreTool{},
+		OmitCurrentDateReminder: true,
+		PromptCacheKey:          "cache-key-42",
+	})
+	for _, err := range s1.Prompt(context.Background(), "hello") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seenKey != "cache-key-42" {
+		t.Fatalf("prompt_cache_key=%q, want cache-key-42", seenKey)
+	}
+	if len(seenMsgs[0]) != 1 || seenMsgs[0][0].Text() != "hello" {
+		t.Fatalf("expected only user message without <system-reminder>, got %+v", seenMsgs[0])
+	}
+
+	// 2. SystemReminderAtTail puts extra reminder AFTER Messages instead of index 0.
+	s2 := NewSession(Options{
+		Provider:                prov,
+		SystemPrompt:            []string{"sys"},
+		Tools:                   []tool.CoreTool{},
+		OmitCurrentDateReminder: true,
+		SystemReminderAtTail:    true,
+		SystemReminderFunc:      func() string { return "dynamic-tail" },
+	})
+	for _, err := range s2.Prompt(context.Background(), "first") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := seenMsgs[1]
+	if len(last) != 2 || last[0].Text() != "first" || !strings.Contains(last[1].Text(), "dynamic-tail") {
+		t.Fatalf("expected tail reminder after user message, got %+v", last)
 	}
 }

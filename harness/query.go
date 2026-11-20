@@ -21,9 +21,17 @@ type QueryInput struct {
 	DynamicBoundary int
 	Messages        []llm.Message // conversation including the latest user turn
 	// SystemReminder, when non-empty, is prepended as the first message on each
-	// model call. It is not stored in conversation history — the host builds it
-	// fresh per Prompt call so it never accumulates across turns.
+	// model call (or appended at the tail when SystemReminderAtTail is true). It
+	// is not stored in conversation history — the host builds it fresh per Prompt
+	// call so it never accumulates across turns.
 	SystemReminder string
+	// SystemReminderAtTail appends SystemReminder after Messages instead of
+	// prepending at index 0, preventing a changing reminder from invalidating
+	// the entire historical KV prefix cache.
+	SystemReminderAtTail bool
+	// PromptCacheKey is forwarded on CompletionRequest for OpenAI / Responses
+	// prefix cache routing.
+	PromptCacheKey string
 	Tools          *tool.Registry
 	// DeferredTools names tools whose schemas are withheld from the model's tool
 	// list (they stay in Tools and are invoked via ExecuteExtraTool). Empty = all
@@ -110,9 +118,10 @@ type QueryInput struct {
 
 // Settlement configures the wrap-up phase that runs when a budget is hit.
 type Settlement struct {
-	Prompt        string   // wrap-up instruction injected as a user turn (empty = settlement off)
-	MaxTurns      int      // turn budget for the wrap-up phase itself (0 = default 2)
-	DisabledTools []string // tool names hidden from the model during wrap-up (e.g. ["Bash"])
+	Prompt          string   // wrap-up instruction injected as a user turn (empty = settlement off)
+	MaxTurns        int      // turn budget for the wrap-up phase itself (0 = default 2)
+	DisabledTools   []string // tool names blocked during wrap-up (e.g. ["Bash"])
+	KeepToolSchemas bool     // keep req.Tools intact (blocks DisabledTools at execution instead of mutating schemas, preserving KV cache)
 	// PromptByReason optionally overrides Prompt based on WHY the run settled
 	// (keyed by the terminal reason, e.g. ReasonTimeout / ReasonMaxTurns). When the
 	// settling reason has a non-empty entry here it is used; otherwise Prompt is used.
@@ -243,9 +252,10 @@ type loop struct {
 	startTime       time.Time // loop start, for MaxDuration (wall-clock budget)
 
 	// settlement (wrap-up) phase state, entered when a budget is hit
-	settling     bool
-	settleReason TerminalReason // the budget reason to finish with after wrap-up
-	settleTurn   int
+	settling            bool
+	settleReason        TerminalReason // the budget reason to finish with after wrap-up
+	settleTurn          int
+	settleDisabledTools map[string]bool
 
 	// recovery / continuation state
 	maxOutputTokensOverride      int
@@ -611,7 +621,15 @@ func (l *loop) beginSettlement(reason TerminalReason, schemas *[]llm.ToolSchema)
 	l.settleReason = reason
 	l.settleTurn = 0
 	if len(s.DisabledTools) > 0 {
-		*schemas = filterToolSchemas(*schemas, s.DisabledTools)
+		if s.KeepToolSchemas {
+			block := make(map[string]bool, len(s.DisabledTools))
+			for _, d := range s.DisabledTools {
+				block[d] = true
+			}
+			l.settleDisabledTools = block
+		} else {
+			*schemas = filterToolSchemas(*schemas, s.DisabledTools)
+		}
 	}
 	return true
 }
@@ -784,7 +802,12 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	l.maybeInjectTodoReminder()
 	msgs := l.requestMessages()
 	if l.in.SystemReminder != "" {
-		msgs = append([]llm.Message{llm.UserText(l.in.SystemReminder)}, msgs...)
+		reminder := llm.UserText(l.in.SystemReminder)
+		if l.in.SystemReminderAtTail {
+			msgs = append(msgs, reminder)
+		} else {
+			msgs = append([]llm.Message{reminder}, msgs...)
+		}
 	}
 	req := llm.CompletionRequest{
 		System:          l.in.System,
@@ -793,6 +816,7 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		Tools:           schemas,
 		MaxTokens:       l.maxTokens(),
 		Temperature:     l.in.Temperature,
+		PromptCacheKey:  l.in.PromptCacheKey,
 	}
 	if l.in.NonStreaming {
 		return l.completeAndExecute(req)

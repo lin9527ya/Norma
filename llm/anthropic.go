@@ -20,7 +20,7 @@ type anthropicSystemBlock struct {
 type anthropicReq struct {
 	Model         string                 `json:"model"`
 	System        []anthropicSystemBlock `json:"system,omitempty"`
-	Messages      []Message              `json:"messages"`
+	Messages      []anthropicMessage     `json:"messages"`
 	Tools         []anthropicTool        `json:"tools,omitempty"`
 	MaxTokens     int                    `json:"max_tokens"`
 	Temperature   *float64               `json:"temperature,omitempty"`
@@ -28,6 +28,16 @@ type anthropicReq struct {
 	Thinking      *anthropicThinking     `json:"thinking,omitempty"`
 	OutputConfig  *anthropicOutputConfig `json:"output_config,omitempty"`
 	Stream        bool                   `json:"stream"`
+}
+
+type anthropicMessage struct {
+	Role    Role                    `json:"role"`
+	Content []anthropicContentBlock `json:"content"`
+}
+
+type anthropicContentBlock struct {
+	ContentBlock
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
 // anthropicThinking is the "thinking":{"type":"enabled"|"disabled"} switch.
@@ -42,9 +52,10 @@ type anthropicOutputConfig struct {
 }
 
 type anthropicTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"input_schema"`
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
 func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
@@ -54,25 +65,47 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	}
 	// Effective thinking mode: a non-empty per-request override (req.Thinking)
 	// wins over Config.ThinkingType. Thinking-type content blocks may be replayed
-	// only when thinking is actively "enabled"; any other mode (incl. "disabled")
-	// strips them so Anthropic does not reject the request.
+	// when thinking is actively enabled/adaptive or PreserveThinkingBlocks is configured
+	// for gateways that enable thinking server-side; explicit "disabled" always strips them.
 	thinkingType := p.cfg.ThinkingType
-	thinkingEnabled := thinkingType != ""
 	if req.Thinking != "" {
 		thinkingType = req.Thinking
-		thinkingEnabled = req.Thinking == "enabled"
+	}
+	thinkingEnabled := (thinkingType == "enabled" || thinkingType == "adaptive" ||
+		(thinkingType != "disabled" && p.cfg.PreserveThinkingBlocks)) && req.Thinking != "disabled"
+
+	sysBlocks := buildAnthropicSystem(req)
+	sysBPs := 0
+	for _, sb := range sysBlocks {
+		if sb.CacheControl != nil {
+			sysBPs++
+		}
+	}
+
+	tools := make([]anthropicTool, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		tools = append(tools, anthropicTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+	}
+	toolBPs := 0
+	if p.cfg.CacheBreakpoints == "rolling" && len(tools) > 0 && sysBPs < maxAnthropicCacheBreakpoints {
+		tools[len(tools)-1].CacheControl = map[string]any{"type": "ephemeral"}
+		toolBPs = 1
+	}
+
+	cleanMsgs := mergeAdjacentSameRole(filterThinkingBlocks(req.Messages, thinkingEnabled))
+	msgBudget := 0
+	if p.cfg.CacheBreakpoints == "rolling" {
+		msgBudget = maxAnthropicCacheBreakpoints - sysBPs - toolBPs
 	}
 	body := anthropicReq{
 		Model:         p.cfg.Model,
-		Messages:      mergeAdjacentSameRole(filterThinkingBlocks(req.Messages, thinkingEnabled)),
+		Messages:      buildAnthropicMessages(cleanMsgs, msgBudget),
+		Tools:         tools,
 		MaxTokens:     maxTok,
 		Temperature:   req.Temperature,
 		StopSequences: req.Stop,
 		Stream:        stream,
-		System:        buildAnthropicSystem(req),
-	}
-	for _, t := range req.Tools {
-		body.Tools = append(body.Tools, anthropicTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+		System:        sysBlocks,
 	}
 	if thinkingType != "" {
 		body.Thinking = &anthropicThinking{Type: thinkingType}
@@ -81,6 +114,61 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 		body.OutputConfig = &anthropicOutputConfig{Effort: p.cfg.ReasoningEffort}
 	}
 	return json.Marshal(body)
+}
+
+const maxAnthropicCacheBreakpoints = 4
+
+func buildAnthropicMessages(msgs []Message, bpBudget int) []anthropicMessage {
+	out := make([]anthropicMessage, len(msgs))
+	for i, m := range msgs {
+		blocks := make([]anthropicContentBlock, len(m.Content))
+		for j, b := range m.Content {
+			blocks[j] = anthropicContentBlock{ContentBlock: b}
+		}
+		out[i] = anthropicMessage{Role: m.Role, Content: blocks}
+	}
+	if bpBudget <= 0 || len(out) == 0 {
+		return out
+	}
+	used := 0
+	// Place a rolling cache read breakpoint two turns back (where the previous
+	// request terminated) when enough history exists, plus a write breakpoint on
+	// the latest message — staying within Anthropic's 4-breakpoint limit.
+	if bpBudget >= 2 && len(out) >= 2 {
+		anchor := len(out) - 3
+		if anchor < 0 {
+			anchor = 0
+		}
+		for idx := anchor; idx >= 0; idx-- {
+			if markLastCacheableBlock(&out[idx]) {
+				used++
+				break
+			}
+		}
+	}
+	if used < bpBudget {
+		for idx := len(out) - 1; idx >= 0; idx-- {
+			if markLastCacheableBlock(&out[idx]) {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func markLastCacheableBlock(m *anthropicMessage) bool {
+	for j := len(m.Content) - 1; j >= 0; j-- {
+		b := m.Content[j]
+		if b.Type == BlockThinking || (b.Type == BlockText && b.Text == "") {
+			continue
+		}
+		if b.CacheControl != nil {
+			return false
+		}
+		m.Content[j].CacheControl = map[string]any{"type": "ephemeral"}
+		return true
+	}
+	return false
 }
 
 // buildAnthropicSystem splits the system prompt at DynamicBoundary, placing a
@@ -125,7 +213,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 		defer resp.Body.Close()
 		scan := newSSEScanner(resp.Body)
 		// 逐字段合并当前请求的累计 usage，兼容迟报缓存和重复快照。
-		usage := anthropicUsageState{}
+		usage := anthropicUsageState{inputTokensIncludesCache: p.cfg.InputTokensIncludesCache}
 		for {
 			_, data, serr := scan.next()
 			if serr == io.EOF {
@@ -175,13 +263,17 @@ func (p *anthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 	if err != nil {
 		return Message{}, "", Usage{}, err
 	}
-	return parseAnthropicResponse(raw)
+	return parseAnthropicResponseWithOptions(raw, p.cfg.InputTokensIncludesCache)
 }
 
 // parseAnthropicResponse decodes a non-streaming Messages API response into the
 // neutral Message model. Anthropic already speaks the content-block shape, so
 // text/thinking/tool_use blocks map across directly.
 func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
+	return parseAnthropicResponseWithOptions(raw, false)
+}
+
+func parseAnthropicResponseWithOptions(raw []byte, inputTokensIncludesCache bool) (Message, string, Usage, error) {
 	var r struct {
 		Type    string `json:"type"`
 		Content []struct {
@@ -212,7 +304,7 @@ func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
 	}
 	var usage Usage
 	if r.Usage != nil {
-		usage = r.Usage.norm()
+		usage = r.Usage.normWithOptions(inputTokensIncludesCache)
 	}
 	var blocks []ContentBlock
 	for _, b := range r.Content {
@@ -304,7 +396,8 @@ func parseAnthropicFrame(data string, usage *anthropicUsageState) (StreamEvent, 
 // 用字段级高水位只发增量：start 有 input 不等于它已经给出了最终 cache，重复 delta
 // 的 output 也不能再次相加。每个 HTTP 请求各持有一份状态，不跨会话共享。
 type anthropicUsageState struct {
-	input, output, cacheRead, cacheWrite int
+	input, output, cacheRead, cacheWrite, totalIn int
+	inputTokensIncludesCache                      bool
 }
 
 func tokenSnapshotDelta(value int, previous *int) int {
@@ -317,10 +410,14 @@ func tokenSnapshotDelta(value int, previous *int) int {
 }
 
 func (s *anthropicUsageState) delta(u anthropicUsage, includeOutput bool) Usage {
+	rawIn := tokenSnapshotDelta(u.InputTokens, &s.input)
 	read := tokenSnapshotDelta(u.cacheRead(), &s.cacheRead)
 	write := tokenSnapshotDelta(u.CacheCreationInputTokens, &s.cacheWrite)
-	out := Usage{InputTokens: tokenSnapshotDelta(u.InputTokens, &s.input) + read + write,
-		CacheReadTokens: read, CacheWriteTokens: write}
+	in := rawIn + read + write
+	if s.inputTokensIncludesCache {
+		in = tokenSnapshotDelta(max(s.input, s.cacheRead+s.cacheWrite), &s.totalIn)
+	}
+	out := Usage{InputTokens: in, CacheReadTokens: read, CacheWriteTokens: write}
 	if includeOutput {
 		out.OutputTokens = tokenSnapshotDelta(u.OutputTokens, &s.output)
 	}
@@ -344,11 +441,21 @@ func (u anthropicUsage) cacheRead() int {
 // input_tokens counts only the non-cached portion, so cache read+creation are folded
 // in. CacheReadTokens/CacheWriteTokens are the cached SUBSET (⊆ InputTokens).
 func (u anthropicUsage) norm() Usage {
+	return u.normWithOptions(false)
+}
+
+func (u anthropicUsage) normWithOptions(inputTokensIncludesCache bool) Usage {
+	read := u.cacheRead()
+	write := u.CacheCreationInputTokens
+	totalIn := u.InputTokens + read + write
+	if inputTokensIncludesCache {
+		totalIn = max(u.InputTokens, read+write)
+	}
 	return Usage{
-		InputTokens:      u.InputTokens + u.cacheRead() + u.CacheCreationInputTokens,
+		InputTokens:      totalIn,
 		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  u.cacheRead(),
-		CacheWriteTokens: u.CacheCreationInputTokens,
+		CacheReadTokens:  read,
+		CacheWriteTokens: write,
 	}
 }
 

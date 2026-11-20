@@ -56,6 +56,7 @@ type oaReq struct {
 	Stop                []string      `json:"stop,omitempty"`
 	Thinking            *oaThinking   `json:"thinking,omitempty"`
 	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
+	PromptCacheKey      string        `json:"prompt_cache_key,omitempty"`
 	Stream              bool          `json:"stream"`
 	StreamOptions       *oaStreamOpts `json:"stream_options,omitempty"`
 }
@@ -255,6 +256,9 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 		body.Thinking = &oaThinking{Type: thinkingType}
 	}
 	body.ReasoningEffort = p.cfg.ReasoningEffort // omitempty drops it when unset
+	if req.PromptCacheKey != "" && !p.cfg.DisablePromptCacheKey {
+		body.PromptCacheKey = req.PromptCacheKey
+	}
 	for _, t := range req.Tools {
 		var ot oaTool
 		ot.Type = "function"

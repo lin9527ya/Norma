@@ -41,6 +41,15 @@ fork 当时保留原 module path 是 Go 的标准 fork 用法（`replace` 右侧
 
 ## 差异清单
 
+### v0.5.13（2026-11-20）：KV 缓存命中率优化（P0-P2）
+
+- **`compaction/compaction.go`（`Config.MicroCompactMinClear`）**：支持按批量阈值跳过逐轮单条清理（仅当可清数量 ≥ `MicroCompactMinClear` 或临近 `autoThreshold`/预测溢出时才统一清），消除 60%–90% 窗口内每轮 1 次的前缀 KV 失效；默认 0 保持原有行为。
+- **`harness/query.go` & `tools.go`（`Settlement.KeepToolSchemas`）**：收尾期开启时保留 `req.Tools` 不变以保护前缀缓存，改为在 `execOne` 拦截并拒绝执行 `DisabledTools`；默认 `false` 保持原有行为。
+- **`agentcore/agentcore.go` & `harness/query.go`（`OmitCurrentDateReminder` / `SystemReminderAtTail` / 会话日期固定 / `PromptCacheKey`）**：默认固定会话创建日避免跨午夜缓存断崖；新增 `OmitCurrentDateReminder` 跳过日期注入、`SystemReminderAtTail` 将动态 reminder 后置、`PromptCacheKey` 透传到模型请求，并在内置 `Compaction` 时自动通过 `ProviderSummarizerWithPrefix` 复用父会话前缀。
+- **`compaction/summarizer.go`（`SummaryPrefix` / `ProviderSummarizerWithPrefix`）**：摘要压缩可携带主循环的 `System` / `DynamicBoundary` / `Tools` / `PromptCacheKey`，命中主对话 95%+ 热前缀；极少数纯调工具无文本输出时自动回退无工具摘要重试。
+- **`llm/openai.go` & `openai_responses.go`（`prompt_cache_key`）**：支持携带 `prompt_cache_key`（可用 `Config.DisablePromptCacheKey` 关闭以兼容严格校验的三方代理）。
+- **`llm/anthropic.go`（`InputTokensIncludesCache` / 思考块兼容 / `CacheBreakpoints: "rolling"`）**：修复 `ThinkingType == "disabled"` 时思考块未剔除的问题，新增 `PreserveThinkingBlocks` 兼容默认开启思考的网关；新增 `InputTokensIncludesCache` 防止已含缓存的网关在 `norm()`/`delta()` 中被重复累加；新增 opt-in `CacheBreakpoints: "rolling"` 为最后一工具和滚动历史消息添加 `cache_control` 断点（严格控制在 Anthropic 4 断点上限内，默认空串保持旧行为）。
+
 ### v0.5.12（2026-11-08）：缓存字段兼容与 OpenAI 累计 usage
 
 | 位置 | 差异 | 为什么 |

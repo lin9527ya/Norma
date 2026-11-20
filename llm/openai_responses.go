@@ -33,6 +33,7 @@ type orReq struct {
 	MaxOutputTokens int           `json:"max_output_tokens,omitempty"`
 	Reasoning       *orReasoning  `json:"reasoning,omitempty"`
 	Temperature     *float64      `json:"temperature,omitempty"`
+	PromptCacheKey  string        `json:"prompt_cache_key,omitempty"`
 	Stream          bool          `json:"stream"`
 	Store           bool          `json:"store"`
 }
@@ -76,6 +77,9 @@ func (p *openaiResponsesProvider) buildBody(req CompletionRequest, stream bool) 
 	// send it only when configured.
 	if req.Thinking != "disabled" && p.cfg.ReasoningEffort != "" {
 		body.Reasoning = &orReasoning{Effort: p.cfg.ReasoningEffort}
+	}
+	if req.PromptCacheKey != "" && !p.cfg.DisablePromptCacheKey {
+		body.PromptCacheKey = req.PromptCacheKey
 	}
 	for _, t := range req.Tools {
 		body.Tools = append(body.Tools, orTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.InputSchema})
