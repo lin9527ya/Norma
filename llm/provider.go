@@ -89,12 +89,19 @@ type Config struct {
 	RateLimit *RateLimit
 
 	// ThinkingType toggles extended/reasoning mode via the request's
-	// "thinking":{"type":...} field, for both formats. "" omits it (provider
-	// default); "enabled"/"disabled" are sent verbatim.
+	// "thinking":{"type":...} field, for Anthropic and OpenAI-compatible formats.
+	// "" omits it (provider default); "enabled"/"disabled"/"adaptive" are used
+	// per provider rules.
 	ThinkingType string
+	// ThinkingBudgetTokens optionally sets Anthropic's "thinking.budget_tokens"
+	// when the effective thinking type is "enabled" (>0 emits it; 0 omits it).
+	// Ignored (and omitted on the wire) for "disabled"/"adaptive" and
+	// non-Anthropic formats.
+	ThinkingBudgetTokens int
 	// ReasoningEffort sets the reasoning strength. "" omits it. For OpenAI it maps
-	// to "reasoning_effort"; for Anthropic to "output_config":{"effort":...}.
-	// Typical values: low / medium / high / max.
+	// to "reasoning_effort"; for Anthropic to "output_config":{"effort":...}; for
+	// OpenAI Responses to "reasoning":{"effort":...}. Automatically suppressed when
+	// effective thinking is disabled.
 	ReasoningEffort string
 	// MaxTokensField selects which request key carries the output cap on
 	// FormatOpenAI (Chat Completions). "" (default) sends the classic
@@ -141,6 +148,34 @@ type Config struct {
 	PromptCacheRetention string
 
 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
+}
+
+// resolveThinkingMode resolves the wire thinking type, whether thinking is
+// explicitly disabled for this request, and the effective reasoning effort.
+//
+// When reqThinking == "disabled" and cfgThinkingType == "" (the profile chose
+// not to emit a top-level "thinking" field), wireType stays "" while disabled
+// becomes true so effort/thinking-block replay are suppressed without forcing an
+// unsupported "thinking" key onto strict schemas. Whenever disabled is true,
+// effortOut is suppressed ("") so disabled thinking never emits effort knobs.
+func resolveThinkingMode(cfgThinkingType, reqThinking, effort string) (wireType string, disabled bool, effortOut string) {
+	wireType = cfgThinkingType
+	switch reqThinking {
+	case "disabled":
+		disabled = true
+		if cfgThinkingType != "" {
+			wireType = "disabled"
+		}
+	case "":
+		disabled = cfgThinkingType == "disabled"
+	default:
+		wireType = reqThinking
+		disabled = false
+	}
+	if !disabled {
+		effortOut = effort
+	}
+	return wireType, disabled, effortOut
 }
 
 // retries returns the effective retry count (0 → default 3; negative → 0).

@@ -40,9 +40,10 @@ type anthropicContentBlock struct {
 	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
-// anthropicThinking is the "thinking":{"type":"enabled"|"disabled"} switch.
+// anthropicThinking is the "thinking":{"type":"enabled"|"disabled"|"adaptive", ...} switch.
 type anthropicThinking struct {
-	Type string `json:"type"`
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 // anthropicOutputConfig carries the reasoning strength via
@@ -71,20 +72,34 @@ func ephemeralCacheControl(ttl string) map[string]any {
 }
 
 func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
+	// Effective thinking mode: a non-empty per-request override (req.Thinking)
+	// adjusts Config.ThinkingType without force-injecting "thinking" when
+	// Config.ThinkingType is unset (""). Explicit "disabled" always strips
+	// replayed thinking blocks and suppresses output_config.effort.
+	thinkingType, thinkingDisabled, effort := resolveThinkingMode(p.cfg.ThinkingType, req.Thinking, p.cfg.ReasoningEffort)
+	thinkingEnabled := !thinkingDisabled && (thinkingType == "enabled" || thinkingType == "adaptive" || p.cfg.PreserveThinkingBlocks)
+
 	maxTok := req.MaxTokens
 	if maxTok == 0 {
 		maxTok = 8192
 	}
-	// Effective thinking mode: a non-empty per-request override (req.Thinking)
-	// wins over Config.ThinkingType. Thinking-type content blocks may be replayed
-	// when thinking is actively enabled/adaptive or PreserveThinkingBlocks is configured
-	// for gateways that enable thinking server-side; explicit "disabled" always strips them.
-	thinkingType := p.cfg.ThinkingType
-	if req.Thinking != "" {
-		thinkingType = req.Thinking
+	budget := 0
+	if thinkingType == "enabled" && p.cfg.ThinkingBudgetTokens > 0 {
+		budget = p.cfg.ThinkingBudgetTokens
+		// Anthropic requires max_tokens > budget_tokens (and budget >= 1024).
+		// When the caller left MaxTokens unset (0 -> 8192 fallback), raise the
+		// fallback ceiling so the configured budget works out of the box; when an
+		// explicit cap was supplied (e.g. summarization), clamp or omit budget.
+		if req.MaxTokens == 0 && maxTok <= budget {
+			maxTok = budget + 4096
+		} else if budget >= maxTok {
+			if maxTok > 1024 {
+				budget = maxTok - 1
+			} else {
+				budget = 0
+			}
+		}
 	}
-	thinkingEnabled := (thinkingType == "enabled" || thinkingType == "adaptive" ||
-		(thinkingType != "disabled" && p.cfg.PreserveThinkingBlocks)) && req.Thinking != "disabled"
 
 	staticTTL := p.cfg.CacheTTL
 	if req.CacheTTL != "" {
@@ -114,21 +129,30 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	if p.cfg.CacheBreakpoints == "rolling" {
 		msgBudget = maxAnthropicCacheBreakpoints - sysBPs - toolBPs
 	}
+	temp := req.Temperature
+	if thinkingType == "enabled" || thinkingType == "adaptive" {
+		// Anthropic rejects non-1.0 temperature when extended/adaptive thinking is enabled.
+		temp = nil
+	}
 	body := anthropicReq{
 		Model:         p.cfg.Model,
 		Messages:      buildAnthropicMessages(cleanMsgs, msgBudget),
 		Tools:         tools,
 		MaxTokens:     maxTok,
-		Temperature:   req.Temperature,
+		Temperature:   temp,
 		StopSequences: req.Stop,
 		Stream:        stream,
 		System:        sysBlocks,
 	}
 	if thinkingType != "" {
-		body.Thinking = &anthropicThinking{Type: thinkingType}
+		th := &anthropicThinking{Type: thinkingType}
+		if budget > 0 {
+			th.BudgetTokens = budget
+		}
+		body.Thinking = th
 	}
-	if p.cfg.ReasoningEffort != "" {
-		body.OutputConfig = &anthropicOutputConfig{Effort: p.cfg.ReasoningEffort}
+	if effort != "" {
+		body.OutputConfig = &anthropicOutputConfig{Effort: effort}
 	}
 	return json.Marshal(body)
 }

@@ -111,13 +111,33 @@ func captureBody(t *testing.T, cfg Config, stubSSE string) map[string]any {
 
 func TestThinkingParamsAnthropic(t *testing.T) {
 	stub := sse(`data: {"type":"message_stop"}`, ``)
-	// set → fields present
-	m := captureBody(t, Config{Format: FormatAnthropic, ThinkingType: "enabled", ReasoningEffort: "high"}, stub)
-	if th, _ := m["thinking"].(map[string]any); th["type"] != "enabled" {
-		t.Fatalf("thinking=%v", m["thinking"])
+	// enabled + budget_tokens + effort → all present; non-1 temperature dropped
+	temp := 0.0
+	raw, m := captureReq(t, Config{Format: FormatAnthropic, ThinkingType: "enabled", ThinkingBudgetTokens: 4096, ReasoningEffort: "high"}, CompletionRequest{Messages: []Message{UserText("go")}, Temperature: &temp}, stub)
+	if th, _ := m["thinking"].(map[string]any); th["type"] != "enabled" || th["budget_tokens"] != float64(4096) {
+		t.Fatalf("thinking=%v (raw=%s)", m["thinking"], raw)
 	}
 	if oc, _ := m["output_config"].(map[string]any); oc["effort"] != "high" {
 		t.Fatalf("output_config=%v", m["output_config"])
+	}
+	if _, hasTemp := m["temperature"]; hasTemp {
+		t.Fatalf("temperature must be omitted when anthropic thinking is enabled, got %v", m["temperature"])
+	}
+	// adaptive omits budget_tokens even if configured, keeps output_config.effort
+	m = captureBody(t, Config{Format: FormatAnthropic, ThinkingType: "adaptive", ThinkingBudgetTokens: 4096, ReasoningEffort: "max"}, stub)
+	if th, _ := m["thinking"].(map[string]any); th["type"] != "adaptive" || th["budget_tokens"] != nil {
+		t.Fatalf("adaptive thinking=%v", m["thinking"])
+	}
+	if oc, _ := m["output_config"].(map[string]any); oc["effort"] != "max" {
+		t.Fatalf("output_config=%v", m["output_config"])
+	}
+	// disabled suppresses output_config.effort and budget_tokens
+	m = captureBody(t, Config{Format: FormatAnthropic, ThinkingType: "disabled", ThinkingBudgetTokens: 4096, ReasoningEffort: "high"}, stub)
+	if th, _ := m["thinking"].(map[string]any); th["type"] != "disabled" || th["budget_tokens"] != nil {
+		t.Fatalf("disabled thinking=%v", m["thinking"])
+	}
+	if _, ok := m["output_config"]; ok {
+		t.Fatalf("output_config must be suppressed when thinking is disabled: %v", m["output_config"])
 	}
 	// unset → both omitted
 	m = captureBody(t, Config{Format: FormatAnthropic}, stub)
@@ -133,12 +153,28 @@ func TestThinkingParamsOpenAI(t *testing.T) {
 	// Non-empty stub so the empty-response retry doesn't fire (this test only
 	// inspects the request body).
 	stub := sse(`data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}`, ``, `data: [DONE]`, ``)
-	// set → fields present
-	m := captureBody(t, Config{Format: FormatOpenAI, ThinkingType: "disabled", ReasoningEffort: "max"}, stub)
-	if th, _ := m["thinking"].(map[string]any); th["type"] != "disabled" {
+	// enabled + effort → both present
+	m := captureBody(t, Config{Format: FormatOpenAI, ThinkingType: "enabled", ReasoningEffort: "max"}, stub)
+	if th, _ := m["thinking"].(map[string]any); th["type"] != "enabled" {
 		t.Fatalf("thinking=%v", m["thinking"])
 	}
 	if m["reasoning_effort"] != "max" {
+		t.Fatalf("reasoning_effort=%v", m["reasoning_effort"])
+	}
+	// disabled suppresses reasoning_effort so conflicting fields never go out
+	m = captureBody(t, Config{Format: FormatOpenAI, ThinkingType: "disabled", ReasoningEffort: "max"}, stub)
+	if th, _ := m["thinking"].(map[string]any); th["type"] != "disabled" {
+		t.Fatalf("thinking=%v", m["thinking"])
+	}
+	if _, ok := m["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort must be suppressed when thinking is disabled: %v", m["reasoning_effort"])
+	}
+	// unset thinking + effort alone still sends reasoning_effort
+	m = captureBody(t, Config{Format: FormatOpenAI, ReasoningEffort: "high"}, stub)
+	if _, ok := m["thinking"]; ok {
+		t.Fatalf("thinking should be omitted: %v", m["thinking"])
+	}
+	if m["reasoning_effort"] != "high" {
 		t.Fatalf("reasoning_effort=%v", m["reasoning_effort"])
 	}
 	// unset → both omitted

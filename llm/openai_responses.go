@@ -63,21 +63,45 @@ type orTool struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
+func isOpenAIResponsesReasoningModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndexByte(m, '/'); i >= 0 {
+		m = m[i+1:]
+	}
+	for _, pfx := range []string{"o1", "o3", "o4", "gpt-5"} {
+		if m == pfx || strings.HasPrefix(m, pfx+"-") || strings.HasPrefix(m, pfx+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// PreservesThinking reports false because the stateless Responses adapter omits
+// historical BlockThinking blocks in toResponsesInput and lets the server manage
+// reasoning state per request.
+func (p *openaiResponsesProvider) PreservesThinking() bool { return false }
+
 func (p *openaiResponsesProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
+	temp := req.Temperature
+	// Responses reasoning models (or endpoints configured with reasoning_effort)
+	// reject non-default temperature (e.g. 0.0 on one-shot verifier/title calls).
+	if p.cfg.ReasoningEffort != "" || isOpenAIResponsesReasoningModel(p.cfg.Model) {
+		temp = nil
+	}
 	body := orReq{
 		Model:           p.cfg.Model,
 		Instructions:    joinSystem(req.System),
 		Input:           toResponsesInput(req.Messages),
 		MaxOutputTokens: req.MaxTokens,
-		Temperature:     req.Temperature,
+		Temperature:     temp,
 		Stream:          stream,
 		Store:           false, // stateless: full history sent each call
 	}
-	// reasoning.effort is the Responses equivalent of reasoning_effort. A
-	// per-request "disabled" (compaction's summary call) suppresses it; otherwise
-	// send it only when configured.
-	if req.Thinking != "disabled" && p.cfg.ReasoningEffort != "" {
-		body.Reasoning = &orReasoning{Effort: p.cfg.ReasoningEffort}
+	// reasoning.effort is the Responses equivalent of reasoning_effort. When
+	// effective thinking is disabled (either Config.ThinkingType=="disabled" or
+	// per-request Thinking=="disabled"), reasoning.effort is suppressed.
+	if _, _, effort := resolveThinkingMode(p.cfg.ThinkingType, req.Thinking, p.cfg.ReasoningEffort); effort != "" {
+		body.Reasoning = &orReasoning{Effort: effort}
 	}
 	if !p.cfg.DisablePromptCacheKey {
 		if req.PromptCacheKey != "" {

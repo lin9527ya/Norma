@@ -220,27 +220,30 @@ func flattenText(blocks []ContentBlock) string {
 }
 
 func (p *openaiProvider) PreservesThinking() bool {
-	return p.cfg.ThinkingType == "enabled" || (p.cfg.ThinkingType != "disabled" && p.cfg.ReasoningEffort != "")
+	return p.cfg.ThinkingType == "enabled" || p.cfg.ThinkingType == "adaptive" ||
+		(p.cfg.ThinkingType != "disabled" && p.cfg.ReasoningEffort != "")
 }
 
 func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
-	// A non-empty per-request override (req.Thinking) wins over Config.ThinkingType.
-	thinkingType := p.cfg.ThinkingType
-	if req.Thinking != "" {
-		thinkingType = req.Thinking
-	}
-	// The request is in thinking mode when either a thinking type is set (a
-	// `thinking` body field goes out) or a reasoning effort is configured — the
-	// same providers that then demand reasoning_content be echoed back.
-	thinking := thinkingType != "" || p.cfg.ReasoningEffort != ""
+	thinkingType, thinkingDisabled, effort := resolveThinkingMode(p.cfg.ThinkingType, req.Thinking, p.cfg.ReasoningEffort)
+	// Thinking mode is active only when not disabled and either a thinking switch
+	// ("enabled"/"adaptive") or reasoning effort will go out — only then should
+	// missing reasoning_content on tool_calls be backfilled with a placeholder.
+	thinkingActive := !thinkingDisabled && (thinkingType == "enabled" || thinkingType == "adaptive" || effort != "")
 
 	msgs := toOpenAIMessages(joinSystem(req.System), req.Messages)
-	msgs = sanitizeOpenAIMessages(msgs, thinking)
+	msgs = sanitizeOpenAIMessages(msgs, thinkingActive)
 
+	temp := req.Temperature
+	// OpenAI reasoning models (marked via max_completion_tokens or configured
+	// reasoning_effort) and active thinking turns reject non-default temperature.
+	if p.cfg.MaxTokensField == MaxTokensFieldCompletion || p.cfg.ReasoningEffort != "" || thinkingActive {
+		temp = nil
+	}
 	body := oaReq{
 		Model:       p.cfg.Model,
 		Messages:    msgs,
-		Temperature: req.Temperature,
+		Temperature: temp,
 		Stop:        req.Stop,
 		Stream:      stream,
 	}
@@ -260,7 +263,7 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 	if thinkingType != "" {
 		body.Thinking = &oaThinking{Type: thinkingType}
 	}
-	body.ReasoningEffort = p.cfg.ReasoningEffort // omitempty drops it when unset
+	body.ReasoningEffort = effort // omitempty drops it when unset or suppressed
 	if !p.cfg.DisablePromptCacheKey {
 		if req.PromptCacheKey != "" {
 			body.PromptCacheKey = req.PromptCacheKey
