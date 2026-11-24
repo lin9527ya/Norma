@@ -26,16 +26,17 @@ type openaiResponsesProvider struct{ cfg Config }
 // ---- request ----
 
 type orReq struct {
-	Model           string        `json:"model"`
-	Instructions    string        `json:"instructions,omitempty"`
-	Input           []orInputItem `json:"input"`
-	Tools           []orTool      `json:"tools,omitempty"`
-	MaxOutputTokens int           `json:"max_output_tokens,omitempty"`
-	Reasoning       *orReasoning  `json:"reasoning,omitempty"`
-	Temperature     *float64      `json:"temperature,omitempty"`
-	PromptCacheKey  string        `json:"prompt_cache_key,omitempty"`
-	Stream          bool          `json:"stream"`
-	Store           bool          `json:"store"`
+	Model                string        `json:"model"`
+	Instructions         string        `json:"instructions,omitempty"`
+	Input                []orInputItem `json:"input"`
+	Tools                []orTool      `json:"tools,omitempty"`
+	MaxOutputTokens      int           `json:"max_output_tokens,omitempty"`
+	Reasoning            *orReasoning  `json:"reasoning,omitempty"`
+	Temperature          *float64      `json:"temperature,omitempty"`
+	PromptCacheKey       string        `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string        `json:"prompt_cache_retention,omitempty"`
+	Stream               bool          `json:"stream"`
+	Store                bool          `json:"store"`
 }
 
 type orReasoning struct {
@@ -78,8 +79,15 @@ func (p *openaiResponsesProvider) buildBody(req CompletionRequest, stream bool) 
 	if req.Thinking != "disabled" && p.cfg.ReasoningEffort != "" {
 		body.Reasoning = &orReasoning{Effort: p.cfg.ReasoningEffort}
 	}
-	if req.PromptCacheKey != "" && !p.cfg.DisablePromptCacheKey {
-		body.PromptCacheKey = req.PromptCacheKey
+	if !p.cfg.DisablePromptCacheKey {
+		if req.PromptCacheKey != "" {
+			body.PromptCacheKey = req.PromptCacheKey
+		}
+		if retention := req.PromptCacheRetention; retention != "" {
+			body.PromptCacheRetention = retention
+		} else if p.cfg.PromptCacheRetention != "" {
+			body.PromptCacheRetention = p.cfg.PromptCacheRetention
+		}
 	}
 	for _, t := range req.Tools {
 		body.Tools = append(body.Tools, orTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.InputSchema})

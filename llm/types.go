@@ -50,6 +50,11 @@ type ContentBlock struct {
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   []ContentBlock `json:"content,omitempty"`
 	IsError   bool           `json:"is_error,omitempty"`
+
+	// CacheSkip marks a transient host-injected block (such as a per-request tail
+	// context index) that must not be chosen as an Anthropic cache breakpoint.
+	// Never serialized on the wire.
+	CacheSkip bool `json:"-"`
 }
 
 // TextBlock builds a text content block.
@@ -74,6 +79,12 @@ type Message struct {
 // UserText builds a user message with one text block.
 func UserText(s string) Message {
 	return Message{Role: RoleUser, Content: []ContentBlock{TextBlock(s)}}
+}
+
+// EphemeralUserText builds a user message carrying a single CacheSkip text block
+// (per-request tail projection that should stay outside Anthropic cache breakpoints).
+func EphemeralUserText(s string) Message {
+	return Message{Role: RoleUser, Content: []ContentBlock{{Type: BlockText, Text: s, CacheSkip: true}}}
 }
 
 // ToolUses returns the tool_use blocks of a message.
@@ -144,4 +155,10 @@ type CompletionRequest struct {
 	// PromptCacheKey is an opaque session/prefix routing hint passed to OpenAI
 	// Chat Completions and Responses APIs as "prompt_cache_key". Empty omits it.
 	PromptCacheKey string
+	// PromptCacheRetention optionally overrides Config.PromptCacheRetention for
+	// THIS request (e.g. "in_memory" / "24h" on OpenAI / Responses).
+	PromptCacheRetention string
+	// CacheTTL optionally overrides Config.CacheTTL for THIS request (e.g. "5m"
+	// or "1h" on Anthropic static breakpoints).
+	CacheTTL string
 }

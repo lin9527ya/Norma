@@ -50,15 +50,16 @@ type oaReq struct {
 	// MaxTokens and MaxCompletionTokens are mutually exclusive: buildBody fills
 	// exactly one of them per Config.MaxTokensField, and omitempty drops the
 	// other. Sending both would make OpenAI reject the request.
-	MaxTokens           int           `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64      `json:"temperature,omitempty"`
-	Stop                []string      `json:"stop,omitempty"`
-	Thinking            *oaThinking   `json:"thinking,omitempty"`
-	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
-	PromptCacheKey      string        `json:"prompt_cache_key,omitempty"`
-	Stream              bool          `json:"stream"`
-	StreamOptions       *oaStreamOpts `json:"stream_options,omitempty"`
+	MaxTokens            int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  int           `json:"max_completion_tokens,omitempty"`
+	Temperature          *float64      `json:"temperature,omitempty"`
+	Stop                 []string      `json:"stop,omitempty"`
+	Thinking             *oaThinking   `json:"thinking,omitempty"`
+	ReasoningEffort      string        `json:"reasoning_effort,omitempty"`
+	PromptCacheKey       string        `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string        `json:"prompt_cache_retention,omitempty"`
+	Stream               bool          `json:"stream"`
+	StreamOptions        *oaStreamOpts `json:"stream_options,omitempty"`
 }
 
 type oaStreamOpts struct {
@@ -218,6 +219,10 @@ func flattenText(blocks []ContentBlock) string {
 	return s.String()
 }
 
+func (p *openaiProvider) PreservesThinking() bool {
+	return p.cfg.ThinkingType == "enabled" || (p.cfg.ThinkingType != "disabled" && p.cfg.ReasoningEffort != "")
+}
+
 func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
 	// A non-empty per-request override (req.Thinking) wins over Config.ThinkingType.
 	thinkingType := p.cfg.ThinkingType
@@ -256,8 +261,15 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 		body.Thinking = &oaThinking{Type: thinkingType}
 	}
 	body.ReasoningEffort = p.cfg.ReasoningEffort // omitempty drops it when unset
-	if req.PromptCacheKey != "" && !p.cfg.DisablePromptCacheKey {
-		body.PromptCacheKey = req.PromptCacheKey
+	if !p.cfg.DisablePromptCacheKey {
+		if req.PromptCacheKey != "" {
+			body.PromptCacheKey = req.PromptCacheKey
+		}
+		if retention := req.PromptCacheRetention; retention != "" {
+			body.PromptCacheRetention = retention
+		} else if p.cfg.PromptCacheRetention != "" {
+			body.PromptCacheRetention = p.cfg.PromptCacheRetention
+		}
 	}
 	for _, t := range req.Tools {
 		var ot oaTool

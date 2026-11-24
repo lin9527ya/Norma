@@ -159,6 +159,13 @@ type Options struct {
 	// PromptCacheKey is forwarded on model requests for OpenAI / Responses
 	// prefix-cache affinity.
 	PromptCacheKey string
+	// PromptCacheRetention optionally overrides OpenAI/Responses retention ("24h").
+	PromptCacheRetention string
+	// CacheTTL optionally overrides Anthropic static-prefix TTL ("5m"/"1h").
+	CacheTTL string
+	// PreserveThinking skips stripping historical thinking blocks during
+	// built-in AutoCompact summary calls when true (or auto-detected from Provider).
+	PreserveThinking bool
 
 	MaxTurns int
 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
@@ -360,15 +367,24 @@ func NewSession(opts Options) *Session {
 		s.writer = s.store.NewWriter(s.sessionID, "")
 	}
 	if opts.Compactor == nil && opts.Compaction != nil {
+		preserveThinking := opts.PreserveThinking
+		if !preserveThinking {
+			if tp, ok := opts.Provider.(interface{ PreservesThinking() bool }); ok {
+				preserveThinking = tp.PreservesThinking()
+			}
+		}
 		s.compactor = compaction.New(*opts.Compaction, compaction.ProviderSummarizerWithPrefix(
 			opts.Provider,
 			opts.MaxTokens,
 			opts.NonStreaming,
 			compaction.SummaryPrefix{
-				System:          s.system(),
-				DynamicBoundary: opts.DynamicBoundary,
-				Tools:           visibleSchemas(s.registry, opts.DeferredTools),
-				PromptCacheKey:  opts.PromptCacheKey,
+				System:               s.system(),
+				DynamicBoundary:      opts.DynamicBoundary,
+				Tools:                visibleSchemas(s.registry, opts.DeferredTools),
+				PromptCacheKey:       opts.PromptCacheKey,
+				PromptCacheRetention: opts.PromptCacheRetention,
+				CacheTTL:             opts.CacheTTL,
+				PreserveThinking:     preserveThinking,
 			},
 		))
 	}
@@ -578,30 +594,32 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		SystemReminder:       buildSystemReminder(s.sessionDate, reminderExtra),
 		SystemReminderAtTail: s.opts.SystemReminderAtTail,
 		PromptCacheKey:       s.opts.PromptCacheKey,
+		PromptCacheRetention: s.opts.PromptCacheRetention,
+		CacheTTL:             s.opts.CacheTTL,
 		Tools:                s.registry,
-		DeferredTools:      s.opts.DeferredTools,
-		MaxTokens:          s.opts.MaxTokens,
-		Temperature:        s.opts.Temperature,
-		MaxTurns:           s.opts.MaxTurns,
-		MaxDuration:        s.opts.MaxDuration,
-		Settlement:         s.opts.Settlement,
-		MaxConcurrency:     s.opts.MaxConcurrency,
-		WorkingDir:         s.opts.WorkingDir,
-		Todos:              s.opts.Todos,
-		ToolOutputDir:      s.opts.ToolOutputDir,
-		MaxToolOutputChars: s.opts.MaxToolOutputChars,
-		Tasks:              s.tasks,
-		BashEnv:            s.opts.BashEnv,
-		BashEnvFunc:        s.opts.BashEnvFunc,
-		PermissionMode:     s.opts.PermissionMode,
-		Allowed:            s.opts.AllowedTools,
-		Disallowed:         s.opts.DisallowedTools,
-		CanUseTool:         s.opts.CanUseTool,
-		Hooks:              s.opts.Hooks,
-		Compactor:          s.compactor,
-		TokenBudget:        s.opts.TokenBudget,
-		EscalateMaxTokens:  s.opts.EscalateMaxTokens,
-		NonStreaming:       s.opts.NonStreaming,
+		DeferredTools:        s.opts.DeferredTools,
+		MaxTokens:            s.opts.MaxTokens,
+		Temperature:          s.opts.Temperature,
+		MaxTurns:             s.opts.MaxTurns,
+		MaxDuration:          s.opts.MaxDuration,
+		Settlement:           s.opts.Settlement,
+		MaxConcurrency:       s.opts.MaxConcurrency,
+		WorkingDir:           s.opts.WorkingDir,
+		Todos:                s.opts.Todos,
+		ToolOutputDir:        s.opts.ToolOutputDir,
+		MaxToolOutputChars:   s.opts.MaxToolOutputChars,
+		Tasks:                s.tasks,
+		BashEnv:              s.opts.BashEnv,
+		BashEnvFunc:          s.opts.BashEnvFunc,
+		PermissionMode:       s.opts.PermissionMode,
+		Allowed:              s.opts.AllowedTools,
+		Disallowed:           s.opts.DisallowedTools,
+		CanUseTool:           s.opts.CanUseTool,
+		Hooks:                s.opts.Hooks,
+		Compactor:            s.compactor,
+		TokenBudget:          s.opts.TokenBudget,
+		EscalateMaxTokens:    s.opts.EscalateMaxTokens,
+		NonStreaming:         s.opts.NonStreaming,
 	}
 	if s.writer != nil {
 		in.Recorder = s.writer

@@ -32,7 +32,12 @@ type QueryInput struct {
 	// PromptCacheKey is forwarded on CompletionRequest for OpenAI / Responses
 	// prefix cache routing.
 	PromptCacheKey string
-	Tools          *tool.Registry
+	// PromptCacheRetention optionally overrides Config.PromptCacheRetention for
+	// requests in this loop (e.g. "in_memory" / "24h").
+	PromptCacheRetention string
+	// CacheTTL optionally overrides Config.CacheTTL on Anthropic static breakpoints.
+	CacheTTL string
+	Tools    *tool.Registry
 	// DeferredTools names tools whose schemas are withheld from the model's tool
 	// list (they stay in Tools and are invoked via ExecuteExtraTool). Empty = all
 	// tool schemas sent as usual.
@@ -810,13 +815,15 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		}
 	}
 	req := llm.CompletionRequest{
-		System:          l.in.System,
-		DynamicBoundary: l.in.DynamicBoundary,
-		Messages:        msgs,
-		Tools:           schemas,
-		MaxTokens:       l.maxTokens(),
-		Temperature:     l.in.Temperature,
-		PromptCacheKey:  l.in.PromptCacheKey,
+		System:               l.in.System,
+		DynamicBoundary:      l.in.DynamicBoundary,
+		Messages:             msgs,
+		Tools:                schemas,
+		MaxTokens:            l.maxTokens(),
+		Temperature:          l.in.Temperature,
+		PromptCacheKey:       l.in.PromptCacheKey,
+		PromptCacheRetention: l.in.PromptCacheRetention,
+		CacheTTL:             l.in.CacheTTL,
 	}
 	if l.in.NonStreaming {
 		return l.completeAndExecute(req)

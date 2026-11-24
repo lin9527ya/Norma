@@ -25,10 +25,12 @@ const summarySystemPrompt = "You are a helpful AI assistant tasked with summariz
 // so compaction's summary request shares the cached KV prefix with the main agent loop
 // instead of cold-prefilling the entire history under a bespoke system prompt.
 type SummaryPrefix struct {
-	System          []string
-	DynamicBoundary int
-	Tools           []llm.ToolSchema
-	PromptCacheKey  string
+	System               []string
+	DynamicBoundary      int
+	Tools                []llm.ToolSchema
+	PromptCacheKey       string
+	PromptCacheRetention string
+	CacheTTL             string
 	// PreserveThinking leaves CompletionRequest.Thinking empty instead of forcing
 	// "disabled", avoiding a thinking-mode cache key change when the session uses
 	// extended thinking.
@@ -83,11 +85,13 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 	reqMsgs = append(reqMsgs, head...)
 	reqMsgs = append(reqMsgs, llm.UserText(compactPrompt))
 	req := llm.CompletionRequest{
-		System:         []string{summarySystemPrompt},
-		Messages:       reqMsgs,
-		MaxTokens:      maxOut,
-		Thinking:       "disabled",
-		PromptCacheKey: prefix.PromptCacheKey,
+		System:               []string{summarySystemPrompt},
+		Messages:             reqMsgs,
+		MaxTokens:            maxOut,
+		Thinking:             "disabled",
+		PromptCacheKey:       prefix.PromptCacheKey,
+		PromptCacheRetention: prefix.PromptCacheRetention,
+		CacheTTL:             prefix.CacheTTL,
 	}
 	hasCustomPrefix := len(prefix.System) > 0 || len(prefix.Tools) > 0
 	if len(prefix.System) > 0 {

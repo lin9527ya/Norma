@@ -58,6 +58,18 @@ type anthropicTool struct {
 	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
+func (p *anthropicProvider) PreservesThinking() bool {
+	return (p.cfg.ThinkingType == "enabled" || p.cfg.ThinkingType == "adaptive" ||
+		(p.cfg.ThinkingType != "disabled" && p.cfg.PreserveThinkingBlocks)) && p.cfg.ThinkingType != "disabled"
+}
+
+func ephemeralCacheControl(ttl string) map[string]any {
+	if ttl == "1h" {
+		return map[string]any{"type": "ephemeral", "ttl": "1h"}
+	}
+	return map[string]any{"type": "ephemeral"}
+}
+
 func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
 	maxTok := req.MaxTokens
 	if maxTok == 0 {
@@ -74,7 +86,12 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	thinkingEnabled := (thinkingType == "enabled" || thinkingType == "adaptive" ||
 		(thinkingType != "disabled" && p.cfg.PreserveThinkingBlocks)) && req.Thinking != "disabled"
 
-	sysBlocks := buildAnthropicSystem(req)
+	staticTTL := p.cfg.CacheTTL
+	if req.CacheTTL != "" {
+		staticTTL = req.CacheTTL
+	}
+
+	sysBlocks := buildAnthropicSystemWithTTL(req, staticTTL)
 	sysBPs := 0
 	for _, sb := range sysBlocks {
 		if sb.CacheControl != nil {
@@ -88,7 +105,7 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	}
 	toolBPs := 0
 	if p.cfg.CacheBreakpoints == "rolling" && len(tools) > 0 && sysBPs < maxAnthropicCacheBreakpoints {
-		tools[len(tools)-1].CacheControl = map[string]any{"type": "ephemeral"}
+		tools[len(tools)-1].CacheControl = ephemeralCacheControl(staticTTL)
 		toolBPs = 1
 	}
 
@@ -130,12 +147,22 @@ func buildAnthropicMessages(msgs []Message, bpBudget int) []anthropicMessage {
 	if bpBudget <= 0 || len(out) == 0 {
 		return out
 	}
+	// Exclude trailing pure-CacheSkip messages (e.g. standalone ephemeral tail
+	// indices) when choosing anchor & tail positions so transient blocks never
+	// consume cache breakpoints or shift Turn-1 -> Turn-2 prefix alignment.
+	stableEnd := len(out) - 1
+	for stableEnd >= 0 && !hasCacheableBlock(&out[stableEnd]) {
+		stableEnd--
+	}
+	if stableEnd < 0 {
+		return out
+	}
 	used := 0
 	// Place a rolling cache read breakpoint two turns back (where the previous
-	// request terminated) when enough history exists, plus a write breakpoint on
-	// the latest message — staying within Anthropic's 4-breakpoint limit.
-	if bpBudget >= 2 && len(out) >= 2 {
-		anchor := len(out) - 3
+	// request terminated) when enough stable history exists, plus a write breakpoint
+	// on the latest stable block — staying within Anthropic's 4-breakpoint limit.
+	if bpBudget >= 2 && stableEnd >= 1 {
+		anchor := stableEnd - 2
 		if anchor < 0 {
 			anchor = 0
 		}
@@ -147,7 +174,7 @@ func buildAnthropicMessages(msgs []Message, bpBudget int) []anthropicMessage {
 		}
 	}
 	if used < bpBudget {
-		for idx := len(out) - 1; idx >= 0; idx-- {
+		for idx := stableEnd; idx >= 0; idx-- {
 			if markLastCacheableBlock(&out[idx]) {
 				break
 			}
@@ -156,10 +183,20 @@ func buildAnthropicMessages(msgs []Message, bpBudget int) []anthropicMessage {
 	return out
 }
 
+func hasCacheableBlock(m *anthropicMessage) bool {
+	for j := len(m.Content) - 1; j >= 0; j-- {
+		b := m.Content[j]
+		if !b.CacheSkip && b.Type != BlockThinking && !(b.Type == BlockText && b.Text == "") {
+			return true
+		}
+	}
+	return false
+}
+
 func markLastCacheableBlock(m *anthropicMessage) bool {
 	for j := len(m.Content) - 1; j >= 0; j-- {
 		b := m.Content[j]
-		if b.Type == BlockThinking || (b.Type == BlockText && b.Text == "") {
+		if b.CacheSkip || b.Type == BlockThinking || (b.Type == BlockText && b.Text == "") {
 			continue
 		}
 		if b.CacheControl != nil {
@@ -174,6 +211,10 @@ func markLastCacheableBlock(m *anthropicMessage) bool {
 // buildAnthropicSystem splits the system prompt at DynamicBoundary, placing a
 // cache breakpoint on the static prefix (FR-02.2).
 func buildAnthropicSystem(req CompletionRequest) []anthropicSystemBlock {
+	return buildAnthropicSystemWithTTL(req, req.CacheTTL)
+}
+
+func buildAnthropicSystemWithTTL(req CompletionRequest, staticTTL string) []anthropicSystemBlock {
 	if len(req.System) == 0 {
 		return nil
 	}
@@ -185,10 +226,10 @@ func buildAnthropicSystem(req CompletionRequest) []anthropicSystemBlock {
 	if b >= len(req.System) {
 		// Boundary at/after the end → the whole system prompt is static; cache it
 		// all in one block (an all-static prompt should still be cacheable).
-		return []anthropicSystemBlock{{Type: "text", Text: joinSystem(req.System), CacheControl: map[string]any{"type": "ephemeral"}}}
+		return []anthropicSystemBlock{{Type: "text", Text: joinSystem(req.System), CacheControl: ephemeralCacheControl(staticTTL)}}
 	}
 	return []anthropicSystemBlock{
-		{Type: "text", Text: joinSystem(req.System[:b]), CacheControl: map[string]any{"type": "ephemeral"}},
+		{Type: "text", Text: joinSystem(req.System[:b]), CacheControl: ephemeralCacheControl(staticTTL)},
 		{Type: "text", Text: joinSystem(req.System[b:])},
 	}
 }

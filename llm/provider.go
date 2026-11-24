@@ -124,10 +124,21 @@ type Config struct {
 	// (within Anthropic's 4-breakpoint limit). Ignored for OpenAI formats.
 	CacheBreakpoints string
 
+	// CacheTTL optionally selects the Anthropic TTL ("1h" vs default "" / "5m")
+	// applied to long-lived static breakpoints (tools and static system prefix).
+	// Rolling message breakpoints always stay at default ephemeral ("5m") so static
+	// prefixes outlive idle gaps without paying 2x write surcharges per turn.
+	CacheTTL string
+
 	// DisablePromptCacheKey suppresses "prompt_cache_key" on OpenAI / Responses
 	// requests even when CompletionRequest.PromptCacheKey is populated (for strict
 	// third-party proxies that reject unknown body fields).
 	DisablePromptCacheKey bool
+
+	// PromptCacheRetention optionally sets OpenAI / Responses
+	// "prompt_cache_retention" (e.g. "in_memory" or "24h") when
+	// DisablePromptCacheKey is false. Empty omits it.
+	PromptCacheRetention string
 
 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
 }

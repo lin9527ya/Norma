@@ -241,6 +241,146 @@ func TestAnthropicRollingCacheBreakpoints(t *testing.T) {
 	}
 }
 
+func TestAnthropicRollingSkipsEphemeralTailBlocks(t *testing.T) {
+	p := &anthropicProvider{cfg: Config{Model: "m", CacheBreakpoints: "rolling"}}
+	turn1Req := CompletionRequest{
+		System:          []string{"static"},
+		DynamicBoundary: 1,
+		Tools:           []ToolSchema{{Name: "Bash", InputSchema: map[string]any{"type": "object"}}},
+		Messages:        []Message{UserText("u0"), EphemeralUserText("ephemeral_ctx_1")},
+	}
+	raw1, err := p.buildBody(turn1Req, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p1 struct {
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw1, &p1); err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.Messages) != 1 || len(p1.Messages[0].Content) != 2 {
+		t.Fatalf("expected merged turn1 user message with 2 blocks, got %+v", p1.Messages)
+	}
+	if p1.Messages[0].Content[0]["cache_control"] == nil || p1.Messages[0].Content[1]["cache_control"] != nil {
+		t.Fatalf("breakpoint must land on stable block[0], not ephemeral tail block[1]: %+v", p1.Messages[0].Content)
+	}
+
+	turn2Req := turn1Req
+	turn2Req.Messages = []Message{
+		UserText("u0"),
+		{Role: RoleAssistant, Content: []ContentBlock{{Type: BlockToolUse, ID: "c1", Name: "Bash", Input: []byte(`{}`)}}},
+		{Role: RoleUser, Content: []ContentBlock{ToolResultText("c1", "ok", false)}},
+		EphemeralUserText("ephemeral_ctx_2"),
+	}
+	raw2, err := p.buildBody(turn2Req, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p2 struct {
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw2, &p2); err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Messages) != 3 {
+		t.Fatalf("expected 3 messages on turn2, got %+v", p2.Messages)
+	}
+	// Turn 2's messages[0] must keep breakpoint on Content[0] (matching Turn 1's cached prefix!)
+	if p2.Messages[0].Content[0]["cache_control"] == nil {
+		t.Fatalf("turn2 messages[0] did not anchor at Turn1 prefix block: %+v", p2.Messages[0])
+	}
+	// Turn 2's tail must land on ToolResult block, not ephemeral_ctx_2
+	if p2.Messages[2].Content[0]["cache_control"] == nil || p2.Messages[2].Content[1]["cache_control"] != nil {
+		t.Fatalf("turn2 tail breakpoint landed on ephemeral block: %+v", p2.Messages[2].Content)
+	}
+
+	// Standalone trailing EphemeralUserText after Assistant turn must fall back to Assistant block
+	standReq := turn1Req
+	standReq.Messages = []Message{
+		UserText("u0"),
+		{Role: RoleAssistant, Content: []ContentBlock{TextBlock("a0")}},
+		EphemeralUserText("ephemeral_only"),
+	}
+	rawS, err := p.buildBody(standReq, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ps struct {
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(rawS, &ps); err != nil {
+		t.Fatal(err)
+	}
+	if ps.Messages[0].Content[0]["cache_control"] == nil || ps.Messages[1].Content[0]["cache_control"] == nil || ps.Messages[2].Content[0]["cache_control"] != nil {
+		t.Fatalf("standalone ephemeral tail shifted anchors wrongly: %+v", ps.Messages)
+	}
+}
+
+func TestAnthropicCacheTTL1hOnStaticPrefixOnly(t *testing.T) {
+	p := &anthropicProvider{cfg: Config{Model: "m", CacheBreakpoints: "rolling", CacheTTL: "1h"}}
+	raw, err := p.buildBody(CompletionRequest{
+		System:          []string{"static", "dyn"},
+		DynamicBoundary: 1,
+		Tools:           []ToolSchema{{Name: "Bash", InputSchema: map[string]any{"type": "object"}}},
+		Messages:        []Message{UserText("u0")},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Tools    []map[string]any `json:"tools"`
+		System   []map[string]any `json:"system"`
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	toolCC, _ := parsed.Tools[0]["cache_control"].(map[string]any)
+	sysCC, _ := parsed.System[0]["cache_control"].(map[string]any)
+	msgCC, _ := parsed.Messages[0].Content[0]["cache_control"].(map[string]any)
+	if toolCC["ttl"] != "1h" || sysCC["ttl"] != "1h" {
+		t.Fatalf("expected 1h TTL on static tools/system, got tool=%v sys=%v", toolCC, sysCC)
+	}
+	if _, hasTTL := msgCC["ttl"]; hasTTL || msgCC["type"] != "ephemeral" {
+		t.Fatalf("expected default 5m ephemeral without ttl on rolling message breakpoint, got %v", msgCC)
+	}
+}
+
+func TestOpenAIPromptCacheRetention(t *testing.T) {
+	p := &openaiProvider{cfg: Config{Format: FormatOpenAI, Model: "m", PromptCacheRetention: "24h"}}
+	raw, err := p.buildBody(CompletionRequest{Messages: []Message{UserText("hi")}, PromptCacheKey: "k1"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["prompt_cache_key"] != "k1" || m["prompt_cache_retention"] != "24h" {
+		t.Fatalf("got key=%v retention=%v", m["prompt_cache_key"], m["prompt_cache_retention"])
+	}
+
+	pDis := &openaiProvider{cfg: Config{Format: FormatOpenAI, Model: "m", DisablePromptCacheKey: true, PromptCacheRetention: "24h"}}
+	rawDis, err := pDis.buildBody(CompletionRequest{Messages: []Message{UserText("hi")}, PromptCacheKey: "k1"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mDis map[string]any
+	_ = json.Unmarshal(rawDis, &mDis)
+	if mDis["prompt_cache_retention"] != nil || mDis["prompt_cache_key"] != nil {
+		t.Fatalf("DisablePromptCacheKey must suppress both key and retention: %v", mDis)
+	}
+}
+
 func countCacheControl(t *testing.T, raw []byte) int {
 	t.Helper()
 	var anyJSON any
