@@ -93,9 +93,12 @@ type Options struct {
 
 	// EnableWebFetch adds the network-facing WebFetch tool (permission-gated).
 	EnableWebFetch bool
-	// WebFetchProxy, when set, routes WebFetch requests through this http(s) proxy
+	// WebFetchProxy, when set, routes WebFetch requests through this http(s)/socks5(h) proxy
 	// URL (e.g. a recording/intercepting proxy). Empty = direct connection.
 	WebFetchProxy string
+	// WebFetchProxyFunc, when non-nil, resolves (proxy, caCert) dynamically on each
+	// WebFetch invocation so upstream proxy failover applies live inside long sessions.
+	WebFetchProxyFunc func() (proxy, caCert string)
 	// WebFetchCACert is a path to a PEM CA cert WebFetch adds to the system trust
 	// pool — verifies HTTPS through a MITM proxy without disabling TLS (preferred
 	// over WebFetchInsecureTLS).
@@ -103,6 +106,9 @@ type Options struct {
 	// WebFetchInsecureTLS skips TLS verification for WebFetch (curl -k). Blunt
 	// fallback when no CA cert is available; prefer WebFetchCACert.
 	WebFetchInsecureTLS bool
+	// WebFetchDisableDirectFallback keeps proxied WebFetch requests fail-closed
+	// (no direct retry on proxy connection failure).
+	WebFetchDisableDirectFallback bool
 	// EnableWebSearch adds the network-facing web_search tool (permission-gated).
 	EnableWebSearch bool
 	// WebSearchBackend selects the search backend: "ddgs" (DuckDuckGo, no key),
@@ -319,7 +325,13 @@ func NewSession(opts Options) *Session {
 		tools = append(tools, opts.Skills.Tool())
 	}
 	if opts.EnableWebFetch {
-		tools = append(tools, tool.NewWebFetch(tool.WebFetchConfig{Proxy: opts.WebFetchProxy, CACert: opts.WebFetchCACert, InsecureTLS: opts.WebFetchInsecureTLS}))
+		tools = append(tools, tool.NewWebFetch(tool.WebFetchConfig{
+			Proxy:                 opts.WebFetchProxy,
+			ProxyFunc:             opts.WebFetchProxyFunc,
+			CACert:                opts.WebFetchCACert,
+			InsecureTLS:           opts.WebFetchInsecureTLS,
+			DisableDirectFallback: opts.WebFetchDisableDirectFallback,
+		}))
 	}
 	if opts.EnableWebSearch {
 		// A misconfigured backend (unknown name, or brave-free without a key)

@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lin9527ya/Norma/permission"
@@ -20,8 +22,11 @@ import (
 
 // WebFetchConfig tunes the network behavior of a WebFetch tool.
 type WebFetchConfig struct {
-	// Proxy, when set, routes requests through this http(s) proxy URL. Empty = direct.
+	// Proxy, when set, routes requests through this http(s)/socks5(h) proxy URL. Empty = direct.
 	Proxy string
+	// ProxyFunc, when non-nil, resolves (proxy, caCert) dynamically on each fetch,
+	// allowing runtime proxy-pool failovers without rebuilding the agent session.
+	ProxyFunc func() (proxy, caCert string)
 	// CACert, when set, is a path to a PEM CA certificate added to the system
 	// trust pool. This lets WebFetch *verify* HTTPS fetched through a MITM/recording
 	// proxy that re-signs certificates with its own CA — the proper alternative to
@@ -31,6 +36,11 @@ type WebFetchConfig struct {
 	// InsecureTLS skips TLS certificate verification entirely (equivalent to
 	// curl -k). A blunt fallback when no CA cert is available; prefer CACert.
 	InsecureTLS bool
+	// DisableDirectFallback disables the one-shot direct (no-proxy) retry when a
+	// proxied fetch fails with a proxy-caused error. Required whenever a fail-closed
+	// global egress proxy or blackhole is in use so target fetches never leak the
+	// host's real source IP.
+	DisableDirectFallback bool
 	// UserAgent overrides the request User-Agent. Empty uses the neutral browser
 	// default; hosts that need a target-appropriate identity can set it explicitly.
 	UserAgent string
@@ -82,6 +92,19 @@ func NewWebFetch(cfg WebFetchConfig) CoreTool {
 
 const maxFetchBytes = 2 << 20 // 2 MiB
 
+// parseFetchProxyURL parses a proxy URL for Go's http.Transport, mapping socks5h
+// to socks5 (Go's SOCKS5 dialer passes hostnames to the proxy by default).
+func parseFetchProxyURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(u.Scheme, "socks5h") {
+		u.Scheme = "socks5"
+	}
+	return u, nil
+}
+
 // newFetchClient returns an HTTP client honoring the proxy / TLS config.
 func newFetchClient(cfg WebFetchConfig) *http.Client {
 	if cfg.Proxy == "" && !cfg.InsecureTLS && cfg.CACert == "" {
@@ -89,7 +112,7 @@ func newFetchClient(cfg WebFetchConfig) *http.Client {
 	}
 	tr := &http.Transport{}
 	if cfg.Proxy != "" {
-		if pu, err := url.Parse(cfg.Proxy); err == nil {
+		if pu, err := parseFetchProxyURL(cfg.Proxy); err == nil {
 			tr.Proxy = http.ProxyURL(pu)
 		}
 	}
@@ -171,13 +194,39 @@ func staticAssetExt(rawURL string) string {
 }
 
 func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *ToolContext) (Result, error) {
-	client := newFetchClient(cfg)
+	var (
+		mu      sync.Mutex
+		clients = map[string]*http.Client{}
+		order   []string
+	)
+	getClient := func(proxyAddr, caCert string) *http.Client {
+		key := proxyAddr + "|" + caCert + "|" + strconv.FormatBool(cfg.InsecureTLS)
+		mu.Lock()
+		defer mu.Unlock()
+		if c, ok := clients[key]; ok {
+			return c
+		}
+		if len(order) >= 8 {
+			evict := order[0]
+			order = order[1:]
+			if old, ok := clients[evict]; ok {
+				if tr, ok := old.Transport.(*http.Transport); ok {
+					tr.CloseIdleConnections()
+				}
+				delete(clients, evict)
+			}
+		}
+		c := newFetchClient(WebFetchConfig{Proxy: proxyAddr, CACert: caCert, InsecureTLS: cfg.InsecureTLS})
+		clients[key] = c
+		order = append(order, key)
+		return c
+	}
 	// direct is the no-proxy fallback used when a proxied fetch fails for a
 	// proxy-caused reason (closed tunnel / failed CONNECT / TLS or HTTP2 mismatch):
 	// it bypasses the configured proxy so a recording/MITM hiccup doesn't fail an
-	// otherwise-reachable URL. nil when no proxy is configured (nothing to bypass).
+	// otherwise-reachable URL. Disabled when DisableDirectFallback is set.
 	var direct *http.Client
-	if cfg.Proxy != "" {
+	if !cfg.DisableDirectFallback && (cfg.Proxy != "" || cfg.ProxyFunc != nil) {
 		direct = newFetchClient(WebFetchConfig{InsecureTLS: cfg.InsecureTLS})
 	}
 	return func(ctx context.Context, input json.RawMessage, _ *ToolContext) (Result, error) {
@@ -194,6 +243,12 @@ func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *
 		if ext := staticAssetExt(in.URL); ext != "" {
 			return Errorf("Error: WebFetch does not fetch static assets (" + ext + " file). It reads HTML pages, documentation, and API responses — not linked resources like scripts, styles, images, or fonts. Fetch the page that references this asset instead."), nil
 		}
+		proxyAddr, caCert := strings.TrimSpace(cfg.Proxy), strings.TrimSpace(cfg.CACert)
+		if cfg.ProxyFunc != nil {
+			p, ca := cfg.ProxyFunc()
+			proxyAddr, caCert = strings.TrimSpace(p), strings.TrimSpace(ca)
+		}
+		client := getClient(proxyAddr, caCert)
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(cctx, http.MethodGet, in.URL, nil)
@@ -205,7 +260,7 @@ func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *
 		// One direct retry when the proxied attempt failed for a proxy-caused reason.
 		// A non-proxy error (bad host, caller timeout/cancel) is returned as-is — a
 		// direct retry wouldn't fix it. The direct response is NOT captured by the proxy.
-		if err != nil && direct != nil && proxyLikelyErr(err) {
+		if err != nil && proxyAddr != "" && !cfg.DisableDirectFallback && direct != nil && proxyLikelyErr(err) {
 			if r2, e2 := http.NewRequestWithContext(cctx, http.MethodGet, in.URL, nil); e2 == nil {
 				r2.Header.Set("User-Agent", webFetchUserAgent(cfg))
 				if resp2, err2 := direct.Do(r2); err2 == nil {

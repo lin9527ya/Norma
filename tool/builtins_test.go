@@ -382,3 +382,65 @@ func TestBashEnvInjection(t *testing.T) {
 		t.Fatalf("env not injected/overridden: %q", out)
 	}
 }
+
+func TestWebFetchDisableDirectFallbackAndProxyFunc(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("content-type", "text/html")
+		_, _ = w.Write([]byte("<h1>Direct Should Stay Blocked</h1>"))
+	}))
+	defer srv.Close()
+
+	// DisableDirectFallback keeps fail-closed blackhole proxies from leaking direct traffic.
+	raw, _ := json.Marshal(map[string]any{"url": srv.URL})
+	res, err := NewWebFetch(WebFetchConfig{
+		Proxy:                 "http://127.0.0.1:1",
+		DisableDirectFallback: true,
+	}).Call(context.Background(), raw, &ToolContext{})
+	if err != nil {
+		t.Fatalf("webfetch: %v", err)
+	}
+	if !strings.Contains(res.Flatten(), "Error fetching URL") {
+		t.Fatalf("expected error with direct fallback disabled, got: %q", res.Flatten())
+	}
+	if hits != 0 {
+		t.Fatalf("expected 0 direct hits when fallback disabled, got %d", hits)
+	}
+
+	// Dynamic ProxyFunc switches from dead proxy to working proxy without rebuilding tool.
+	var proxyHits int
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		w.Header().Set("content-type", "text/html")
+		_, _ = w.Write([]byte("<h1>Proxied OK</h1>"))
+	}))
+	defer proxySrv.Close()
+
+	active := "http://127.0.0.1:1"
+	wf := NewWebFetch(WebFetchConfig{
+		ProxyFunc:             func() (string, string) { return active, "" },
+		DisableDirectFallback: true,
+	})
+	res1, err := wf.Call(context.Background(), raw, &ToolContext{})
+	if err != nil {
+		t.Fatalf("first webfetch: %v", err)
+	}
+	if !strings.Contains(res1.Flatten(), "Error fetching URL") || hits != 0 {
+		t.Fatalf("expected fail-closed on first call, hits=%d out=%q", hits, res1.Flatten())
+	}
+
+	active = proxySrv.URL
+	res2, err := wf.Call(context.Background(), raw, &ToolContext{})
+	if err != nil {
+		t.Fatalf("second webfetch: %v", err)
+	}
+	if !strings.Contains(res2.Flatten(), "Proxied OK") || proxyHits != 1 {
+		t.Fatalf("expected dynamic switch to working proxy, proxyHits=%d out=%q", proxyHits, res2.Flatten())
+	}
+
+	u, err := parseFetchProxyURL("socks5h://user:pass@127.0.0.1:1080")
+	if err != nil || u.Scheme != "socks5" || u.Host != "127.0.0.1:1080" {
+		t.Fatalf("parseFetchProxyURL socks5h=%v err=%v", u, err)
+	}
+}
